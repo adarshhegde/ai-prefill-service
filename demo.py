@@ -226,7 +226,7 @@ def main():
         print("\n🚀 Ready to use the system:")
         print("   1. Web Interface: streamlit run streamlit_app.py")
         print("   2. Programmatic: from main import process_car_image_end_to_end")
-        print("   3. Batch Processing: Use process_multiple_images_with_rate_limiting")
+        print("   3. Batch Processing: Use process_multiple_images")
     else:
         print(f"⚠️  {success_count}/{total_demos} demos completed successfully")
         if not image_path:

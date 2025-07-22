@@ -7,339 +7,8 @@ from pathlib import Path
 import base64
 import numpy as np
 
-# Global quota tracking
-DAILY_REQUEST_COUNT = 0
-DAILY_REQUEST_LIMIT = 50  # Default fallback, will be auto-detected
-MINUTE_REQUEST_LIMIT = 15  # Default fallback, will be auto-detected
-REQUEST_START_TIME = time.time()
-QUOTA_AUTO_DETECTED = False
 
-def track_api_usage():
-    """Track API usage to stay within quotas"""
-    global DAILY_REQUEST_COUNT, DAILY_REQUEST_LIMIT
-    
-    DAILY_REQUEST_COUNT += 1
-    remaining = DAILY_REQUEST_LIMIT - DAILY_REQUEST_COUNT
-    
-    print(f"📊 API Usage: {DAILY_REQUEST_COUNT}/{DAILY_REQUEST_LIMIT} requests ({(DAILY_REQUEST_COUNT/DAILY_REQUEST_LIMIT)*100:.1f}%)")
-    
-    if remaining <= 5:
-        print(f"⚠️  WARNING: Only {remaining} requests remaining today!")
-    
-    if DAILY_REQUEST_COUNT >= DAILY_REQUEST_LIMIT:
-        print(f"🚫 DAILY QUOTA EXCEEDED! Please wait for reset or upgrade plan.")
-        return False
-    
-    return True
 
-def estimate_quota_usage(num_images):
-    """Estimate if we have enough quota for batch processing"""
-    global DAILY_REQUEST_COUNT, DAILY_REQUEST_LIMIT
-    
-    remaining = DAILY_REQUEST_LIMIT - DAILY_REQUEST_COUNT
-    
-    print(f"📊 Quota Check:")
-    print(f"   Current usage: {DAILY_REQUEST_COUNT}/{DAILY_REQUEST_LIMIT}")
-    print(f"   Remaining: {remaining} requests")
-    print(f"   Requested: {num_images} images")
-    
-    if num_images > remaining:
-        print(f"❌ Insufficient quota! Need {num_images} but only {remaining} available.")
-        print(f"💡 Suggestions:")
-        print(f"   - Process {remaining} images now")
-        print(f"   - Wait for daily reset (midnight PT)")
-        print(f"   - Upgrade to paid plan for higher limits")
-        return False, remaining
-    
-    print(f"✅ Sufficient quota available")
-    return True, remaining
-
-def show_quota_status_and_options():
-    """Show current quota status and available options"""
-    global DAILY_REQUEST_COUNT, DAILY_REQUEST_LIMIT
-    
-    remaining = DAILY_REQUEST_LIMIT - DAILY_REQUEST_COUNT
-    usage_percent = (DAILY_REQUEST_COUNT / DAILY_REQUEST_LIMIT) * 100
-    
-    print(f"\n📊 GEMINI API QUOTA STATUS")
-    print(f"{'='*50}")
-    print(f"Daily Usage: {DAILY_REQUEST_COUNT}/{DAILY_REQUEST_LIMIT} ({usage_percent:.1f}%)")
-    print(f"Remaining: {remaining} requests")
-    
-    # Calculate time until reset (midnight Pacific Time)
-    import datetime
-    import pytz
-    
-    try:
-        pacific = pytz.timezone('US/Pacific')
-        now_pacific = datetime.datetime.now(pacific)
-        
-        # Next midnight Pacific Time
-        next_midnight = (now_pacific + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        time_until_reset = next_midnight - now_pacific
-        
-        hours = int(time_until_reset.total_seconds() // 3600)
-        minutes = int((time_until_reset.total_seconds() % 3600) // 60)
-        
-        print(f"Reset in: {hours}h {minutes}m (midnight Pacific Time)")
-    except:
-        print(f"Reset: Midnight Pacific Time")
-    
-    print(f"{'='*50}")
-    
-    if remaining <= 0:
-        print(f"🚫 QUOTA EXHAUSTED")
-        print(f"Options:")
-        print(f"1. ⏰ Wait for daily reset")
-        print(f"2. 💳 Upgrade to paid plan:")
-        print(f"   - Pay-per-use: $0.075 per 1K requests")
-        print(f"   - Higher daily limits")
-        print(f"3. 🔄 Optimize usage with caching")
-    elif remaining <= 5:
-        print(f"⚠️  LOW QUOTA WARNING")
-        print(f"Recommend upgrading soon or waiting for reset")
-    else:
-        print(f"✅ Quota healthy - {remaining} requests available")
-    
-    return remaining
-
-def detect_api_quota_limits():
-    """Automatically detect API quota limits by analyzing response headers"""
-    global DAILY_REQUEST_LIMIT, MINUTE_REQUEST_LIMIT, QUOTA_AUTO_DETECTED
-    
-    api_key = setup_gemini_client()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
-    
-    # Make a minimal test request to check headers
-    test_payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": "Test quota detection"}
-                ]
-            }
-        ],
-        "generationConfig": {
-            "maxOutputTokens": 10
-        }
-    }
-    
-    try:
-        print("🔍 Auto-detecting API quota limits...")
-        response = requests.post(url, json=test_payload)
-        
-        # Parse quota information from response headers
-        headers = response.headers
-        
-        # Common quota header patterns
-        quota_headers = [
-            'x-ratelimit-limit-requests-per-day',
-            'x-quota-limit-requests-per-day', 
-            'x-daily-quota-limit',
-            'x-ratelimit-limit',
-            'quota-limit-requests-per-day'
-        ]
-        
-        minute_headers = [
-            'x-ratelimit-limit-requests-per-minute',
-            'x-quota-limit-requests-per-minute',
-            'x-minute-quota-limit',
-            'quota-limit-requests-per-minute'
-        ]
-        
-        detected_daily = None
-        detected_minute = None
-        
-        # Check for daily quota headers
-        for header in quota_headers:
-            if header in headers:
-                try:
-                    detected_daily = int(headers[header])
-                    print(f"✅ Detected daily limit: {detected_daily} requests/day")
-                    break
-                except (ValueError, TypeError):
-                    continue
-        
-        # Check for minute quota headers  
-        for header in minute_headers:
-            if header in headers:
-                try:
-                    detected_minute = int(headers[header])
-                    print(f"✅ Detected minute limit: {detected_minute} requests/minute")
-                    break
-                except (ValueError, TypeError):
-                    continue
-        
-        # If we got a 429 error, try to parse quota info from error message
-        if response.status_code == 429:
-            try:
-                error_data = response.json()
-                error_message = str(error_data)
-                
-                # Look for quota patterns in error message
-                import re
-                
-                daily_match = re.search(r'(\d+)\s*requests?\s*per\s*day', error_message, re.IGNORECASE)
-                if daily_match:
-                    detected_daily = int(daily_match.group(1))
-                    print(f"✅ Detected daily limit from error: {detected_daily} requests/day")
-                
-                minute_match = re.search(r'(\d+)\s*requests?\s*per\s*minute', error_message, re.IGNORECASE)
-                if minute_match:
-                    detected_minute = int(minute_match.group(1))
-                    print(f"✅ Detected minute limit from error: {detected_minute} requests/minute")
-                    
-            except:
-                pass
-        
-        # Update global limits if detected
-        if detected_daily:
-            DAILY_REQUEST_LIMIT = detected_daily
-            
-        if detected_minute:
-            MINUTE_REQUEST_LIMIT = detected_minute
-            
-        # Try to infer model tier based on response
-        model_tier = "unknown"
-        
-        if detected_daily:
-            if detected_daily <= 50:
-                model_tier = "free"
-            elif detected_daily <= 1000:
-                model_tier = "basic-paid"
-            else:
-                model_tier = "premium-paid"
-        
-        if detected_daily or detected_minute:
-            QUOTA_AUTO_DETECTED = True
-            print(f"🎯 Quota auto-detection successful!")
-            print(f"   Model: gemini-1.5-pro")
-            print(f"   Tier: {model_tier}")
-            print(f"   Daily Limit: {DAILY_REQUEST_LIMIT}")
-            print(f"   Minute Limit: {MINUTE_REQUEST_LIMIT}")
-        else:
-            print(f"⚠️  Could not auto-detect quotas, using defaults:")
-            print(f"   Daily Limit: {DAILY_REQUEST_LIMIT} (default)")
-            print(f"   Minute Limit: {MINUTE_REQUEST_LIMIT} (default)")
-            
-            # Try to detect based on response success/failure patterns
-            if response.status_code == 200:
-                print(f"✅ API responding normally, quotas likely higher than defaults")
-            elif response.status_code == 429:
-                print(f"⚠️  Already at quota limit - may need to adjust tracking")
-        
-        return {
-            "daily_limit": DAILY_REQUEST_LIMIT,
-            "minute_limit": MINUTE_REQUEST_LIMIT,
-            "auto_detected": QUOTA_AUTO_DETECTED,
-            "model_tier": model_tier
-        }
-        
-    except Exception as e:
-        print(f"❌ Quota detection failed: {e}")
-        print(f"Using default limits: {DAILY_REQUEST_LIMIT} daily, {MINUTE_REQUEST_LIMIT} per minute")
-        return {
-            "daily_limit": DAILY_REQUEST_LIMIT,
-            "minute_limit": MINUTE_REQUEST_LIMIT,
-            "auto_detected": False,
-            "error": str(e)
-        }
-
-def get_model_specific_limits(model_name="gemini-1.5-pro"):
-    """Get model-specific quota limits with fallback values"""
-    
-    # Known limits for different Gemini models (as of 2024)
-    model_limits = {
-        "gemini-1.5-pro": {
-            "free_tier": {"daily": 50, "minute": 2},
-            "paid_tier": {"daily": 1000, "minute": 10}
-        },
-        "gemini-1.5-flash": {
-            "free_tier": {"daily": 50, "minute": 15}, 
-            "paid_tier": {"daily": 1000, "minute": 1000}
-        },
-        "gemini-pro": {
-            "free_tier": {"daily": 50, "minute": 2},
-            "paid_tier": {"daily": 1000, "minute": 10}
-        }
-    }
-    
-    # Try auto-detection first
-    detected = detect_api_quota_limits()
-    
-    if detected["auto_detected"]:
-        return detected
-    
-    # Fallback to known limits
-    if model_name in model_limits:
-        # Default to free tier limits
-        limits = model_limits[model_name]["free_tier"]
-        print(f"📋 Using known limits for {model_name} (free tier)")
-        print(f"   Daily: {limits['daily']}, Minute: {limits['minute']}")
-        
-        global DAILY_REQUEST_LIMIT, MINUTE_REQUEST_LIMIT
-        DAILY_REQUEST_LIMIT = limits["daily"]
-        MINUTE_REQUEST_LIMIT = limits["minute"]
-        
-        return {
-            "daily_limit": limits["daily"],
-            "minute_limit": limits["minute"],
-            "auto_detected": False,
-            "model_tier": "free",
-            "source": "known_limits"
-        }
-    
-    # Final fallback
-    print(f"⚠️  Unknown model {model_name}, using conservative defaults")
-    return {
-        "daily_limit": 50,
-        "minute_limit": 2,
-        "auto_detected": False,
-        "model_tier": "unknown",
-        "source": "conservative_default"
-    }
-
-def reset_quota_tracking(current_usage=None):
-    """Reset quota tracking (call this after daily reset or when starting fresh)"""
-    global DAILY_REQUEST_COUNT, REQUEST_START_TIME
-    
-    if current_usage is not None:
-        DAILY_REQUEST_COUNT = current_usage
-        print(f"📊 Quota tracking initialized to {current_usage} requests")
-    else:
-        DAILY_REQUEST_COUNT = 0
-        print(f"📊 Quota tracking reset to 0")
-    
-    REQUEST_START_TIME = time.time()
-    print(f"⏰ Session started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-def initialize_quota_from_dashboard():
-    """Initialize quota based on current dashboard status with auto-detection"""
-    print(f"🚗 AI Car Autofill - Initializing with Gemini Pro Model")
-    print(f"{'='*60}")
-    
-    # Auto-detect quota limits for the Pro model
-    quota_info = get_model_specific_limits("gemini-1.5-pro")
-    
-    print(f"\n🔧 Based on your dashboard showing 53/50 requests used...")
-    print(f"Setting quota tracking to reflect current usage")
-    
-    # Since they're over the limit, set to the detected/known limit to prevent further requests
-    reset_quota_tracking(quota_info["daily_limit"])
-    
-    print(f"\n📊 MODEL UPGRADE BENEFITS:")
-    print(f"✅ Switched to: gemini-1.5-pro (more accurate)")
-    print(f"✅ Better car identification and technical specs")
-    print(f"✅ More context-aware field completion")
-    print(f"✅ Auto-detected quota limits: {quota_info['daily_limit']}/day, {quota_info['minute_limit']}/min")
-    
-    print(f"\n💡 Recommendations:")
-    print(f"1. ⏰ Wait for daily quota reset (midnight Pacific Time)")
-    print(f"2. 💳 Consider upgrading to paid plan for immediate access")
-    print(f"3. 🔍 Use show_quota_status_and_options() to check reset time")
-    print(f"4. 🎯 Pro model gives much better car analysis results")
-    
-    return quota_info
 
 
 # Load environment variables
@@ -371,10 +40,7 @@ def encode_image_to_base64(image_path):
 
 
 def extract_car_info_with_gemini(image_path, form_schema=None, max_retries=3):
-    """Extract car information from image using Gemini Vision API with rate limiting"""
-    # Check quota before making request
-    if not track_api_usage():
-        return {"error": "Daily quota exceeded. Please wait for reset or upgrade plan."}
+    """Extract car information from image using Gemini Vision API"""
     
     api_key = setup_gemini_client()
     
@@ -446,53 +112,31 @@ def extract_car_info_with_gemini(image_path, form_schema=None, max_retries=3):
         }
     }
     
-    # Retry logic with exponential backoff for rate limiting
-    for attempt in range(max_retries + 1):
-        try:
-            response = requests.post(url, json=payload)
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        
+        result = response.json()
+        if 'candidates' in result and result['candidates']:
+            content = result['candidates'][0]['content']['parts'][0]['text']
             
-            # Handle rate limiting specifically
-            if response.status_code == 429:
-                if attempt < max_retries:
-                    # Exponential backoff: 2^attempt seconds + random jitter
-                    import random
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    print(f"⏳ Rate limited. Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    return {"error": f"Rate limit exceeded after {max_retries} retries. Please try again later."}
-            
-            response.raise_for_status()
-            
-            result = response.json()
-            if 'candidates' in result and result['candidates']:
-                content = result['candidates'][0]['content']['parts'][0]['text']
-                
-                # Extract JSON from response
-                import re
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if json_match:
-                    extracted_data = json.loads(json_match.group())
-                    return extracted_data
-                else:
-                    return {"error": "No JSON found in response", "raw_response": content}
+            # Extract JSON from response
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                extracted_data = json.loads(json_match.group())
+                return extracted_data
             else:
-                return {"error": "No response from Gemini", "result": result}
-                
-        except requests.exceptions.RequestException as e:
-            if attempt < max_retries and "429" in str(e):
-                # Additional retry for network-level 429 errors
-                import random
-                wait_time = (2 ** attempt) + random.uniform(0, 1)
-                print(f"⏳ Network rate limit. Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}...")
-                time.sleep(wait_time)
-                continue
-            return {"error": f"API request failed: {e}"}
-        except json.JSONDecodeError as e:
-            return {"error": f"JSON parsing failed: {e}"}
-        except Exception as e:
-            return {"error": f"Unexpected error: {e}"}
+                return {"error": "No JSON found in response", "raw_response": content}
+        else:
+            return {"error": "No response from Gemini", "result": result}
+            
+    except requests.exceptions.RequestException as e:
+        return {"error": f"API request failed: {e}"}
+    except json.JSONDecodeError as e:
+        return {"error": f"JSON parsing failed: {e}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {e}"}
 
 
 def normalize_text_for_search(text):
@@ -749,11 +393,6 @@ def match_gemini_extraction_to_form(extracted_data, vector_dataset, use_vector_s
 def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
     """Complete end-to-end processing: image -> extraction -> form autofill"""
     print(f"🚗 Processing car image: {image_path}")
-    
-    # Add throttling delay to respect API rate limits
-    if add_delay:
-        print("⏱️  Adding delay to respect API rate limits...")
-        time.sleep(1.5)  # 1.5 second delay between requests
     
     # Step 1: Extract car info with Gemini
     print("📸 Step 1: Extracting car information with Gemini Vision...")
@@ -1120,32 +759,19 @@ def enhance_match_info_with_form_data(extracted_data, vector_dataset, match_info
     return enhanced_match_info
 
 
-def process_multiple_images_with_rate_limiting(image_paths, vector_dataset, delay_between_requests=2.0):
-    """Process multiple car images with intelligent rate limiting"""
-    # Check quota before starting batch processing
-    can_process, remaining = estimate_quota_usage(len(image_paths))
-    
-    if not can_process:
-        # Process only what we can with remaining quota
-        if remaining > 0:
-            print(f"🔄 Processing only {remaining} images due to quota limits...")
-            image_paths = image_paths[:remaining]
-        else:
-            return {"error": "No quota remaining. Please wait for daily reset."}
-    
+def process_multiple_images(image_paths, vector_dataset):
+    """Process multiple car images"""
     results = {}
     successful_count = 0
     failed_count = 0
     
     print(f"🚗 Starting batch processing of {len(image_paths)} images...")
-    print(f"⏱️  Using {delay_between_requests}s delay between requests to respect API limits")
     
     for i, image_path in enumerate(image_paths, 1):
         print(f"\n📸 Processing image {i}/{len(image_paths)}: {image_path}")
         
         try:
-            # Process with rate limiting
-            result = process_car_image_end_to_end(image_path, vector_dataset, add_delay=(i > 1))
+            result = process_car_image_end_to_end(image_path, vector_dataset, add_delay=False)
             
             if 'error' in result:
                 print(f"❌ Failed: {result['error']}")
@@ -1164,11 +790,6 @@ def process_multiple_images_with_rate_limiting(image_paths, vector_dataset, dela
             print(f"❌ Exception: {e}")
             results[image_path] = error_result
             failed_count += 1
-        
-        # Add extra delay between requests to be respectful
-        if i < len(image_paths):
-            print(f"⏳ Waiting {delay_between_requests}s before next request...")
-            time.sleep(delay_between_requests)
     
     print(f"\n📊 Batch processing complete!")
     print(f"✅ Successful: {successful_count}")
