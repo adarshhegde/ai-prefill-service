@@ -428,7 +428,8 @@ def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
     ikman_form_json = generate_ikman_form_submission_json(extracted_data, vector_dataset, matched_result['match_info'])
     
     print("✅ Form JSON generation completed")
-    print(f"   Generated {len(ikman_form_json)} form fields")
+    print(f"   Generated {len(ikman_form_json['ai_generated'])} form fields")
+    print(f"   Manual fill required for {len(ikman_form_json['manual_required'])} fields")
     
     # Add the ikman form JSON to the result
     matched_result['ikman_form_submission'] = ikman_form_json
@@ -443,8 +444,13 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
     # Get the form field mappings from our dataset
     form_mappings = vector_dataset.get('form_field_mappings', {})
     
-    # Initialize the form submission structure
-    form_submission = {}
+    # Initialize the form submission structure with ALL fields
+    ai_generated = {}
+    manual_required = []
+    
+    # First, populate ALL fields with "manual_fill_required" as default
+    for field_key, field_info in form_mappings.items():
+        ai_generated[field_key] = "manual_fill_required"
     
     # Helper function for fuzzy string matching
     def fuzzy_match_string(target, options, threshold=0.6):
@@ -583,9 +589,9 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_value = fuzzy_match_string(transmission, field_values)
                 # If LLM returned null or no match, don't add the field (manual fill required)
             
-            # Add to form submission if we found a match
+            # Replace "manual_fill_required" with matched value if we found a match
             if matched_value:
-                form_submission[field_key] = matched_value['key']
+                ai_generated[field_key] = matched_value['key']
         
         elif field_type == 'tree':
             # Handle tree fields (brand and model)
@@ -594,7 +600,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                 if match_info.get('confidence', 0) > 0.5:
                     brand_data = match_info.get('matched_brand_data')
                     if brand_data:
-                        form_submission[field_key] = brand_data.get('key')
+                        ai_generated[field_key] = brand_data.get('key')
                     else:
                         # Try to find brand from extracted data
                         brand = extracted_data.get('brand')
@@ -602,7 +608,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                             brand_values = field_info.get('values', [])
                             matched_brand = fuzzy_match_string(brand, brand_values, threshold=0.5)
                             if matched_brand:
-                                form_submission[field_key] = matched_brand['key']
+                                ai_generated[field_key] = matched_brand['key']
         
         elif field_type == 'year':
             # Handle year fields using LLM's intelligent year estimation
@@ -615,10 +621,10 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         max_year = field_info.get('constraints', {}).get('max_year', 2026)
                         
                         if min_year <= year_int <= max_year:
-                            form_submission[field_key] = year_int
-                        # If LLM's year is out of range, don't add the field (manual fill required)
+                            ai_generated[field_key] = year_int
+                        # If LLM's year is out of range, keep "manual_fill_required"
                     except (ValueError, TypeError):
-                        pass  # If LLM year is invalid, don't add the field
+                        pass  # If LLM year is invalid, keep "manual_fill_required"
         
         elif field_type == 'measurement':
             # Handle measurement fields using LLM's intelligent estimates
@@ -632,10 +638,10 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         max_mileage = field_info.get('constraints', {}).get('maximum', 1000000)
                         
                         if min_mileage <= mileage_int <= max_mileage:
-                            form_submission[field_key] = mileage_int
-                        # If LLM's mileage is out of range, don't add the field (manual fill required)
+                            ai_generated[field_key] = mileage_int
+                        # If LLM's mileage is out of range, keep "manual_fill_required"
                     except (ValueError, TypeError):
-                        pass  # If LLM mileage is invalid, don't add the field
+                        pass  # If LLM mileage is invalid, keep "manual_fill_required"
             
             elif field_key == 'engine_capacity':
                 # Use LLM's intelligent engine capacity estimation
@@ -647,10 +653,10 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         max_capacity = field_info.get('constraints', {}).get('maximum', 10000)
                         
                         if min_capacity <= capacity_int <= max_capacity:
-                            form_submission[field_key] = capacity_int
-                        # If LLM's capacity is out of range, don't add the field (manual fill required)
+                            ai_generated[field_key] = capacity_int
+                        # If LLM's capacity is out of range, keep "manual_fill_required"
                     except (ValueError, TypeError):
-                        pass  # If LLM capacity is invalid, don't add the field
+                        pass  # If LLM capacity is invalid, keep "manual_fill_required"
         
         elif field_type == 'money':
             # Handle money fields using LLM's intelligent price estimation
@@ -664,16 +670,15 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         max_price = field_info.get('constraints', {}).get('maximum', 9999999999999)
                         
                         if min_price <= price_int <= max_price:
-                            form_submission[field_key] = price_int
-                        # If LLM's price is out of range, don't add the field (manual fill required)
+                            ai_generated[field_key] = price_int
+                        # If LLM's price is out of range, keep "manual_fill_required"
                     except (ValueError, TypeError):
-                        pass  # If LLM price is invalid, don't add the field
+                        pass  # If LLM price is invalid, keep "manual_fill_required"
         
         elif field_type in ['text', 'description']:
-            # Handle text fields
-            if field_info.get('required', False):
-                generated_text = generate_text_field_value(field_key, field_info, extracted_data)
-                form_submission[field_key] = generated_text
+            # Handle text fields - always generate text for all text fields
+            generated_text = generate_text_field_value(field_key, field_info, extracted_data)
+            ai_generated[field_key] = generated_text
     
     # Handle brand and model fields specifically
     # ikman.lk expects both brand and model in the form submission
@@ -684,8 +689,8 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
         # First try to use matched model data from vector search
         model_data = match_info.get('matched_model_data')
         if model_data and model_data.get('model_key'):
-            form_submission['brand'] = model_data.get('brand_key')
-            form_submission['model'] = model_data.get('model_key')
+            ai_generated['brand'] = model_data.get('brand_key')
+            ai_generated['model'] = model_data.get('model_key')
         else:
             # Fallback: Search through vector entries to find matching brand-model combination
             for entry in vector_dataset.get('vector_entries', []):
@@ -694,22 +699,30 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     entry_model = entry.get('model_label', '').lower()
                     
                     if (brand in entry_brand and model in entry_model):
-                        form_submission['brand'] = entry.get('brand_key')
-                        form_submission['model'] = entry.get('model_key')
+                        ai_generated['brand'] = entry.get('brand_key')
+                        ai_generated['model'] = entry.get('model_key')
                         break
     elif brand:
         # If we only have brand, try to match just the brand
         brand_data = match_info.get('matched_brand_data')
         if brand_data:
-            form_submission['brand'] = brand_data.get('key')
+            ai_generated['brand'] = brand_data.get('key')
         else:
             # Fallback: Search for brand in form mappings
             brand_values = form_mappings.get('brand', {}).get('values', [])
             matched_brand = fuzzy_match_string(brand, brand_values, threshold=0.5)
             if matched_brand:
-                form_submission['brand'] = matched_brand['key']
+                ai_generated['brand'] = matched_brand['key']
     
-    return form_submission
+    # Build the manual_required list
+    for field_key, value in ai_generated.items():
+        if value == "manual_fill_required":
+            manual_required.append(field_key)
+    
+    return {
+        "ai_generated": ai_generated,
+        "manual_required": manual_required
+    }
 
 
 def enhance_match_info_with_form_data(extracted_data, vector_dataset, match_info):
