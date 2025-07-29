@@ -429,7 +429,7 @@ def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
     
     print("✅ Form JSON generation completed")
     print(f"   Generated {len(ikman_form_json['ai_generated'])} form fields")
-    print(f"   Manual fill required for {len(ikman_form_json['manual_required'])} fields")
+    # print(f"   Manual fill required for {len(ikman_form_json['manual_required'])} fields")
     
     # Add the ikman form JSON to the result
     matched_result['ikman_form_submission'] = ikman_form_json
@@ -715,13 +715,12 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                 ai_generated['brand'] = matched_brand['key']
     
     # Build the manual_required list
-    for field_key, value in ai_generated.items():
-        if value == "manual_fill_required":
-            manual_required.append(field_key)
+    # for field_key, value in ai_generated.items():
+        # if value == "manual_fill_required":
+            # manual_required.append(field_key)
     
     return {
-        "ai_generated": ai_generated,
-        "manual_required": manual_required
+        "ai_generated": ai_generated
     }
 
 
