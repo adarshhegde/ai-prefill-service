@@ -583,7 +583,7 @@ def render_page_2_processing():
         # Field Statistics
         st.markdown("---")
         st.markdown("""
-        <div style="background-color: #e8f5e8; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #2e8b57; margin-bottom: 2rem;">
+        <div style="background-color: #e8f5e8; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #2e8b57; margin-bottom: 2rem; color: black;">
         <h3>📊 Auto-Fill Statistics</h3>
         </div>
         """, unsafe_allow_html=True)
@@ -614,7 +614,7 @@ def render_page_2_processing():
         
         # ikman.lk Form JSON
         st.markdown("""
-        <div style="background-color: #f0f8ff; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #1f4e79; margin-bottom: 2rem;">
+        <div style="background-color: #f0f8ff; padding: 1.5rem; border-radius: 10px; border-left: 5px solid #1f4e79; margin-bottom: 2rem; color: black;">
         <h3>📋 ikman.lk Form Submission Data</h3>
         </div>
         """, unsafe_allow_html=True)
