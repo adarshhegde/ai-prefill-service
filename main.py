@@ -6,10 +6,7 @@ import os
 from pathlib import Path
 import base64
 import numpy as np
-
-
-
-
+import pickle
 
 # Load environment variables
 def load_env_vars():
@@ -20,7 +17,7 @@ def load_env_vars():
             for line in f:
                 if '=' in line and not line.startswith('#'):
                     key, value = line.strip().split('=', 1)
-                    os.environ[key] = value.strip('"').strip("'")
+                    os.environ[key] = value.strip('"').strip("' ")
 
 load_env_vars()
 
@@ -39,54 +36,32 @@ def encode_image_to_base64(image_path):
         return base64.b64encode(image_file.read()).decode('utf-8')
 
 
-def extract_car_info_with_gemini(image_path, form_schema=None, max_retries=3):
-    """Extract car information from image using Gemini Vision API"""
+def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_results=None, max_retries=3):
+    """Extract car information from image using Gemini Vision API with retry logic"""
     
     api_key = setup_gemini_client()
     
     # Encode image
+    print("📸 Encoding image for Gemini API...")
     image_base64 = encode_image_to_base64(image_path)
     
-    # Create prompt for structured extraction
+    # Simple prompt - just extract brand and model, no constraints
     prompt = """
-    Analyze this car image and extract comprehensive information in JSON format.
-    
-    IMPORTANT: Use only English characters (A-Z, a-z, 0-9, spaces, hyphens) in your response. 
-    Convert any special characters or accents to their English equivalents (e.g., Citroën → Citroen, Peugeot → Peugeot).
-    
-    CRITICAL: Be CONTEXT-AWARE and MODEL-SPECIFIC for ALL fields. Use your knowledge of the specific car model to provide accurate specifications:
-    - Research the typical specifications of the exact model you identify
-    - Consider model variants (e.g., e-C3 = electric, AMG = high performance, etc.)
-    - Provide realistic market values based on year, condition, and model
-    - Use actual technical specifications for the identified model
-    
+    Analyze this car image and extract the brand and model. Return ONLY a JSON object with this structure:
+
     {
-        "brand": "exact brand name using only English characters",
-        "model": "specific model name using only English characters",
-        "year": "estimated manufacturing year (YYYY format)",
-        "condition": "estimated condition (new, used, reconditioned)",
-        "body_type": "body style (sedan, hatchback, suv, coupe, convertible, pickup, van, etc.)",
-        "fuel_type": "MODEL-SPECIFIC fuel type (electric, hybrid, diesel, petrol, or null if uncertain)",
-        "transmission": "MODEL-SPECIFIC transmission (manual, automatic, cvt, or null if uncertain/not applicable)",
-        "engine_capacity": "MODEL-SPECIFIC engine displacement in CC (e.g., 1200, 1500, 2000, or null for electric)",
-        "estimated_mileage": "realistic mileage estimate based on year and condition (in kilometers, or null if uncertain)",
-        "estimated_price_lkr": "realistic market price estimate in Sri Lankan Rupees based on model, year, condition (or null if uncertain)",
-        "color": "primary exterior color",
-        "confidence": "overall confidence score 0-1",
-        "visible_features": ["list of clearly visible features"],
-        "extraction_notes": "detailed observations about the specific model, its specifications, and market context"
+        "brand": "car brand (e.g., Toyota, Honda, BMW)",
+        "model": "car model (e.g., Corolla, Civic, 3 Series)",
+        "confidence": "confidence level (0.0 to 1.0)"
     }
-    
-    Focus on MODEL-SPECIFIC accuracy. Use your knowledge of car specifications, not generic estimates.
-    If you cannot determine a specific value with reasonable confidence, use null - do not guess.
-    For prices, consider Sri Lankan car market conditions and depreciation patterns.
+
+    Guidelines:
+    - Be specific with model names (e.g., "Corolla" not just "Toyota")
+    - If you can't identify clearly, use "unknown" for brand or model
+    - Focus on the most prominent car in the image
     """
     
-    if form_schema:
-        prompt += f"\n\nAvailable form options:\n{json.dumps(form_schema, indent=2)}"
-        prompt += "\n\nEnsure your extracted values match the available options where possible."
-    
-    # Make API request to Gemini Pro (more accurate for complex analysis)
+    # Make API request to Gemini Pro
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
     
     payload = {
@@ -104,39 +79,148 @@ def extract_car_info_with_gemini(image_path, form_schema=None, max_retries=3):
             }
         ],
         "generationConfig": {
-            "temperature": 0.05,  # Lower for more consistent technical analysis
-            "topK": 3,
+            "temperature": 0.0,
+            "topK": 1,
             "topP": 0.95,
-            "maxOutputTokens": 1500,  # More tokens for detailed analysis
+            "maxOutputTokens": 2048,
             "candidateCount": 1
         }
     }
     
+    # Retry logic with exponential backoff
+    for attempt in range(max_retries):
+        try:
+            print(f"🤖 Sending request to Gemini Vision API... (attempt {attempt + 1}/{max_retries})")
+            import time
+            start_time = time.time()
+            
+            # Add delay between retries to respect rate limits
+            if attempt > 0:
+                delay = min(2 ** attempt, 10)  # Exponential backoff, max 10 seconds
+                print(f"⏳ Waiting {delay}s before retry...")
+                time.sleep(delay)
+            
+            response = requests.post(url, json=payload, timeout=90)  # Increased timeout to 90 seconds
+            response.raise_for_status()
+            
+            api_duration = time.time() - start_time
+            print(f"📊 Processing Gemini API response... (took {api_duration:.1f}s)")
+            result = response.json()
+            
+            if 'candidates' in result and result['candidates']:
+                content = result['candidates'][0]['content']['parts'][0]['text']
+                
+                # Extract token usage from response
+                usage_info = result.get('usageMetadata', {})
+                input_tokens = usage_info.get('promptTokenCount', 0)
+                output_tokens = usage_info.get('candidatesTokenCount', 0)
+                
+                # Debug: Print actual token counts
+                print(f"🔍 Token Usage Debug: input={input_tokens:,}, output={output_tokens:,}")
+                
+                import re
+                json_match = re.search(r'```json\n(\{.*?\})\n```', content, re.DOTALL)
+                if not json_match:
+                    json_match = re.search(r'(\{.*?\})', content, re.DOTALL)
+
+                if json_match:
+                    try:
+                        print("✅ Parsing JSON response from Gemini...")
+                        extracted_data = json.loads(json_match.group(1))
+                        print(f"🎯 Extracted: {extracted_data.get('brand', 'Unknown')} {extracted_data.get('model', 'Unknown')}")
+                        
+                        # Add token usage to the response
+                        extracted_data['_token_usage'] = {
+                            'input_tokens': input_tokens,
+                            'output_tokens': output_tokens,
+                            'total_tokens': input_tokens + output_tokens
+                        }
+                        
+                        return extracted_data
+                    except json.JSONDecodeError:
+                         print("❌ Failed to parse JSON from Gemini response")
+                         return {"error": "Invalid JSON in response", "raw_response": content}
+                else:
+                    print("❌ No JSON found in Gemini response")
+                    return {"error": "No JSON found in response", "raw_response": content}
+            else:
+                print("❌ No response from Gemini API")
+                return {"error": "No response from Gemini", "result": result}
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ API request failed (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:  # Last attempt
+                return {"error": f"API request failed after {max_retries} attempts: {e}"}
+            continue  # Try again
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON parsing failed (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:  # Last attempt
+                return {"error": f"JSON parsing failed after {max_retries} attempts: {e}"}
+            continue  # Try again
+        except Exception as e:
+            print(f"❌ Unexpected error (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:  # Last attempt
+                return {"error": f"Unexpected error after {max_retries} attempts: {e}"}
+            continue  # Try again
+    
+    # If we get here, all retries failed
+    return {"error": f"All {max_retries} attempts failed"}
+
+
+
+def get_preliminary_query(image_path):
+    """Use a lightweight prompt to get a brand/model query from an image."""
+    api_key = setup_gemini_client()
+    image_base64 = encode_image_to_base64(image_path)
+
+    prompt = """
+    Analyze this car image and identify the brand and model.
+    Respond with only the brand and model, separated by a space.
+    For example: "Toyota Corolla" or "BMW 3 Series".
+    If you are not confident, respond with "unknown".
+    """
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 50,
+        }
+    }
+
     try:
         response = requests.post(url, json=payload)
         response.raise_for_status()
-        
         result = response.json()
         if 'candidates' in result and result['candidates']:
-            content = result['candidates'][0]['content']['parts'][0]['text']
+            content = result['candidates'][0]['content']['parts'][0]['text'].strip()
             
-            # Extract JSON from response
-            import re
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                extracted_data = json.loads(json_match.group())
-                return extracted_data
-            else:
-                return {"error": "No JSON found in response", "raw_response": content}
-        else:
-            return {"error": "No response from Gemini", "result": result}
+            # Extract token usage
+            usage_info = result.get('usageMetadata', {})
+            input_tokens = usage_info.get('promptTokenCount', 0)
+            output_tokens = usage_info.get('candidatesTokenCount', 0)
             
-    except requests.exceptions.RequestException as e:
-        return {"error": f"API request failed: {e}"}
-    except json.JSONDecodeError as e:
-        return {"error": f"JSON parsing failed: {e}"}
-    except Exception as e:
-        return {"error": f"Unexpected error: {e}"}
+            # Debug: Print actual token counts
+            print(f"🔍 Preliminary Query Token Debug: input={input_tokens:,}, output={output_tokens:,}")
+            
+            if content.lower() != "unknown":
+                return {
+                    'query': content,
+                    'token_usage': {
+                        'input_tokens': input_tokens,
+                        'output_tokens': output_tokens,
+                        'total_tokens': input_tokens + output_tokens
+                    }
+                }
+    except Exception:
+        return None
+    return None
 
 
 def normalize_text_for_search(text):
@@ -161,94 +245,115 @@ def normalize_text_for_search(text):
     text = re.sub(r'[_\-\s]+', ' ', text)
     
     # Remove special characters except spaces and hyphens
-    text = re.sub(r'[^a-z0-9\s\-]', '', text)
+    text = re.sub(r'[^a-z0-9\s-]', '', text)
     
     # Clean up extra spaces
     text = ' '.join(text.split())
-    
+
     return text.strip()
 
 
+def load_saved_faiss_data():
+    """Load saved FAISS index and TF-IDF vectorizer if they exist"""
+    index_path = "faiss_index.bin"
+    vectorizer_path = "tfidf_vectorizer.pkl"
+    metadata_path = "faiss_metadata.pkl"
+    
+    if (os.path.exists(index_path) and 
+        os.path.exists(vectorizer_path) and 
+        os.path.exists(metadata_path)):
+        try:
+            import faiss
+            # Load FAISS index
+            index = faiss.read_index(index_path)
+            
+            # Load TF-IDF vectorizer
+            with open(vectorizer_path, 'rb') as f:
+                tfidf_vectorizer = pickle.load(f)
+            
+            # Load metadata
+            with open(metadata_path, 'rb') as f:
+                metadata = pickle.load(f)
+            
+            print(f"✅ Loaded saved FAISS index with {index.ntotal} vectors")
+            
+            def query_embedding_function(query_text):
+                """Transform query text to TF-IDF embedding"""
+                normalized_query = normalize_text_for_search(query_text)
+                query_vector = tfidf_vectorizer.transform([normalized_query]).toarray().astype(np.float32)
+                faiss.normalize_L2(query_vector)
+                return query_vector
+            
+            return {
+                'index': index,
+                'metadata': metadata,
+                'embedding_function': query_embedding_function,
+                'tfidf_vectorizer': tfidf_vectorizer
+            }
+        except Exception as e:
+            print(f"❌ Error loading saved FAISS data: {e}")
+            return None
+    return None
+
+
+
+def clear_cached_embeddings():
+    """Clear cached FAISS embeddings and vectorizer"""
+    cache_files = ["faiss_index.bin", "tfidf_vectorizer.pkl", "faiss_metadata.pkl"]
+    cleared_count = 0
+    
+    for file_path in cache_files:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                cleared_count += 1
+                print(f"🗑️ Removed cached file: {file_path}")
+            except Exception as e:
+                print(f"❌ Error removing {file_path}: {e}")
+    
+    if cleared_count > 0:
+        print(f"✅ Cleared {cleared_count} cached embedding files")
+    else:
+        print("ℹ️ No cached embedding files found to clear")
+    
+    return cleared_count
+
 def setup_faiss_vector_search(vector_dataset):
-    """Setup FAISS index for vector similarity search"""
+    """Setup FAISS index for vector similarity search with caching"""
+    # First try to load saved data
+    saved_data = load_saved_faiss_data()
+    if saved_data:
+        return saved_data
+    
+    # If no cached data exists, create the index automatically
+    print("🔧 No cached vector index found! Creating index on first run...")
+    print("⏳ This may take a few minutes for the initial setup...")
+    
+    # Import the create_vector_index function
     try:
-        import faiss
-        print("✅ FAISS imported successfully")
+        from create_vector_index import create_vector_index
+        success = create_vector_index("car_vector_dataset.json", ".")
+        
+        if success:
+            print("✅ Vector index created successfully!")
+            # Try to load the newly created data
+            saved_data = load_saved_faiss_data()
+            if saved_data:
+                return saved_data
+            else:
+                raise RuntimeError("Failed to load newly created vector index")
+        else:
+            raise RuntimeError("Failed to create vector index")
+            
     except ImportError:
-        print("❌ FAISS not installed. Installing...")
-        os.system("pip install faiss-cpu")
-        import faiss
-    
-    try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        print("✅ scikit-learn imported successfully")
-    except ImportError:
-        print("❌ scikit-learn not installed. Installing...")
-        os.system("pip install scikit-learn")
-        from sklearn.feature_extraction.text import TfidfVectorizer
-    
-    # Prepare vectors for indexing
-    texts = []
-    metadata = []
-    
-    for entry in vector_dataset['vector_entries']:
-        if entry['type'] in ['brand', 'brand_model']:
-            # Normalize embedding text for consistency
-            normalized_text = normalize_text_for_search(entry['embedding_text'])
-            if normalized_text:  # Only add non-empty normalized text
-                texts.append(normalized_text)
-                metadata.append(entry)
-                
-                # Add search variations as additional entries (also normalized)
-                for variation in entry.get('search_variations', []):
-                    normalized_variation = normalize_text_for_search(variation)
-                    if normalized_variation and normalized_variation != normalized_text:
-                        texts.append(normalized_variation)
-                        metadata.append(entry)
-    
-    print(f"📊 Prepared {len(texts)} normalized text entries for vector indexing")
-    
-    # Create TF-IDF vectorizer optimized for car brand/model matching
-    tfidf_vectorizer = TfidfVectorizer(
-        analyzer='char_wb',  # Use character n-grams with word boundaries
-        ngram_range=(2, 4),  # Use 2-4 character n-grams
-        max_features=1000,   # Limit features for efficiency
-        lowercase=True,
-        strip_accents='unicode'
-    )
-    
-    # Fit and transform the texts
-    print("🔍 Generating TF-IDF embeddings...")
-    tfidf_matrix = tfidf_vectorizer.fit_transform(texts)
-    
-    # Convert to dense array for FAISS
-    embeddings = tfidf_matrix.toarray().astype(np.float32)
-    
-    # Create FAISS index
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dimension)  # Inner product for normalized vectors
-    
-    # Normalize embeddings for cosine similarity
-    faiss.normalize_L2(embeddings)
-    index.add(embeddings)
-    
-    print(f"🔍 FAISS index created with {index.ntotal} vectors, dimension: {dimension}")
-    
-    def query_embedding_function(query_text):
-        """Transform query text to TF-IDF embedding"""
-        normalized_query = normalize_text_for_search(query_text)
-        query_vector = tfidf_vectorizer.transform([normalized_query]).toarray().astype(np.float32)
-        faiss.normalize_L2(query_vector)
-        return query_vector
-    
-    return {
-        'index': index,
-        'embeddings': embeddings,
-        'texts': texts,
-        'metadata': metadata,
-        'embedding_function': query_embedding_function,
-        'tfidf_vectorizer': tfidf_vectorizer
-    }
+        print("❌ Error: Could not import create_vector_index module")
+        print("💡 Please ensure create_vector_index.py is in the same directory")
+        raise FileNotFoundError(
+            "Vector index creation failed. Please check that create_vector_index.py is available."
+        )
+    except Exception as e:
+        print(f"❌ Error creating vector index: {e}")
+        raise RuntimeError(f"Failed to create vector index: {e}")
 
 
 def search_vector_database(query_text, faiss_data, top_k=5):
@@ -265,9 +370,12 @@ def search_vector_database(query_text, faiss_data, top_k=5):
     results = []
     for score, idx in zip(scores[0], indices[0]):
         if idx < len(faiss_data['metadata']):
+            # Handle case where 'texts' might not be available (when loading from cache)
+            text = faiss_data.get('texts', [None] * len(faiss_data['metadata']))[idx] if 'texts' in faiss_data else None
+            
             result = {
                 'score': float(score),
-                'text': faiss_data['texts'][idx],
+                'text': text,
                 'original_text': faiss_data['metadata'][idx]['embedding_text'],  # Keep original for reference
                 'normalized_query': normalized_query,
                 'metadata': faiss_data['metadata'][idx]
@@ -394,17 +502,9 @@ def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
     """Complete end-to-end processing: image -> extraction -> form autofill"""
     print(f"🚗 Processing car image: {image_path}")
     
-    # Step 1: Extract car info with Gemini
-    print("📸 Step 1: Extracting car information with Gemini Vision...")
-    form_schema = {
-        'brands': [entry['brand_label'] for entry in vector_dataset['vector_entries'] 
-                  if entry['type'] in ['brand', 'brand_model']][:20],  # Sample for prompt
-        'conditions': [v['label'] for v in vector_dataset['form_field_mappings']['condition']['values']],
-        'body_types': [v['label'] for v in vector_dataset['form_field_mappings']['body']['values']],
-        'fuel_types': [v['label'] for v in vector_dataset['form_field_mappings']['fuel_type']['values']]
-    }
-    
-    extracted_data = extract_car_info_with_gemini(image_path, form_schema)
+    # Step 1: Extract brand/model with Gemini (simple, no constraints)
+    print("📸 Step 1: Extracting brand and model with Gemini Vision...")
+    extracted_data = extract_car_info_with_gemini(image_path)
     
     if 'error' in extracted_data:
         return {'error': extracted_data['error']}
@@ -414,43 +514,188 @@ def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
     print(f"   Model: {extracted_data.get('model', 'Unknown')}")
     print(f"   Confidence: {extracted_data.get('confidence', 0)}")
     
-    # Step 2: Match to form values
-    print("\n🔍 Step 2: Matching to form values...")
-    matched_result = match_gemini_extraction_to_form(extracted_data, vector_dataset, use_vector_search=True)
+    # Step 2: Vector search to find matching car in our dataset
+    print("\n🔍 Step 2: Vector search for matching car...")
+    query = f"{extracted_data.get('brand', '')} {extracted_data.get('model', '')}".strip()
+    faiss_data = setup_faiss_vector_search(vector_dataset)
+    vector_results = search_vector_database(query, faiss_data, top_k=5)
     
-    print("✅ Matching completed")
-    print(f"   Method: {matched_result['match_info']['method']}")
-    print(f"   Confidence: {matched_result['match_info']['confidence']:.2f}")
+    if vector_results:
+        print(f"✅ Found {len(vector_results)} potential matches")
+        best_match = vector_results[0]
+        print(f"   Best match: {best_match.get('brand_label', 'Unknown')} {best_match.get('model_label', 'Unknown')}")
+    else:
+        print("⚠️ No vector search matches found")
+        best_match = None
     
-    # Step 3: Enhance match info and generate exact form submission JSON
-    print("\n📝 Step 3: Generating ikman.lk form submission JSON...")
-    enhanced_match_info = enhance_match_info_with_form_data(extracted_data, vector_dataset, matched_result['match_info'])
-    ikman_form_json = generate_ikman_form_submission_json(extracted_data, vector_dataset, matched_result['match_info'])
+    # Step 3: Generate form fields using matched data + image analysis
+    print("\n📝 Step 3: Generating form fields...")
+    ikman_form_json = generate_ikman_form_submission_json(extracted_data, vector_dataset, {'match': best_match})
     
     print("✅ Form JSON generation completed")
     print(f"   Generated {len(ikman_form_json['ai_generated'])} form fields")
-    # print(f"   Manual fill required for {len(ikman_form_json['manual_required'])} fields")
     
-    # Add the ikman form JSON to the result
-    matched_result['ikman_form_submission'] = ikman_form_json
-    matched_result['enhanced_match_info'] = enhanced_match_info
-    
-    return matched_result
+    return {
+        'extracted_data': extracted_data,
+        'vector_results': vector_results,
+        'ikman_form_submission': ikman_form_json
+    }
 
+def extract_additional_details_with_gemini(image_path, matched_car_info, vector_dataset, max_retries=3):
+    """Extract additional details from image using matched car information and ikman classification data"""
+    api_key = setup_gemini_client()
+    image_base64 = encode_image_to_base64(image_path)
+    
+    # Create prompt with matched car context and ikman classification data
+    brand = matched_car_info.get('brand_label', 'Unknown')
+    model = matched_car_info.get('model_label', 'Unknown')
+    
+    # Get ikman classification data
+    form_mappings = vector_dataset.get('form_field_mappings', {})
+    condition_values = [v['label'] for v in form_mappings.get('condition', {}).get('values', [])]
+    body_values = [v['label'] for v in form_mappings.get('body', {}).get('values', [])]
+    fuel_values = [v['label'] for v in form_mappings.get('fuel_type', {}).get('values', [])]
+    transmission_values = [v['label'] for v in form_mappings.get('transmission', {}).get('values', [])]
+    
+    prompt = f"""
+    Analyze this car {brand} {model}.
+    
+    Extract additional details and return ONLY a JSON object using the EXACT provided conditions:
+
+    {{
+        "condition": "condition (must be one of: {', '.join(condition_values)})",
+        "body": "body type (must be one of: {', '.join(body_values)})",
+        "fuel_type": "fuel type (must be one of: {', '.join(fuel_values)})",
+        "transmission": "transmission type (must be one of: {', '.join(transmission_values)})",
+        "mileage": "mileage in km (ONLY if dashboard/odometer is clearly visible with readable numbers, otherwise null)",
+        "mileage_confidence": "confidence for mileage reading (0.0 to 1.0, null if not visible)",
+        "color": "primary exterior color",
+        "year": "estimated manufacturing year (YYYY format)",
+        "price": "estimated price in LKR (provide reasonable estimate based on brand, model, year, and condition)",
+        "engine_capacity": "engine capacity in cc (e.g., 1500, 2000, or null for electric)",
+        "visible_features": ["list of visible features like alloy wheels, sunroof, etc."]
+    }}
+
+    Guidelines:
+    - Use EXACT values from the lists provided
+    - Only extract mileage if dashboard/odometer is clearly visible and readable
+    - For price estimation: Provide reasonable estimates based on brand, model, year, and condition
+    - Focus on clearly visible information
+    - For electric vehicles, set engine_capacity to null, and transmission to automatic
+    """
+    
+    # Make API request to Gemini Pro
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": image_base64
+                        }
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.0,
+            "topK": 1,
+            "topP": 0.95,
+            "maxOutputTokens": 1024,
+            "candidateCount": 1
+        }
+    }
+    
+    # Retry logic with exponential backoff
+    for attempt in range(max_retries):
+        try:
+            print(f"🤖 Extracting additional details... (attempt {attempt + 1}/{max_retries})")
+            import time
+            start_time = time.time()
+            
+            # Add delay between retries to respect rate limits
+            if attempt > 0:
+                delay = min(2 ** attempt, 10)  # Exponential backoff, max 10 seconds
+                print(f"⏳ Waiting {delay}s before retry...")
+                time.sleep(delay)
+            
+            response = requests.post(url, json=payload, timeout=90)
+            response.raise_for_status()
+            
+            api_duration = time.time() - start_time
+            print(f"📊 Processing Gemini API response... (took {api_duration:.1f}s)")
+            result = response.json()
+            
+            if 'candidates' in result and result['candidates']:
+                content = result['candidates'][0]['content']['parts'][0]['text']
+                
+                # Extract token usage from response
+                usage_info = result.get('usageMetadata', {})
+                input_tokens = usage_info.get('promptTokenCount', 0)
+                output_tokens = usage_info.get('candidatesTokenCount', 0)
+                
+                # Debug: Print actual token counts
+                print(f"🔍 Additional Details Token Debug: input={input_tokens:,}, output={output_tokens:,}")
+                
+                import re
+                json_match = re.search(r'```json\n(\{.*?\})\n```', content, re.DOTALL)
+                if not json_match:
+                    json_match = re.search(r'(\{.*?\})', content, re.DOTALL)
+
+                if json_match:
+                    try:
+                        print("✅ Parsing additional details JSON response...")
+                        additional_data = json.loads(json_match.group(1))
+                        
+                        # Add token usage to the response
+                        additional_data['_token_usage'] = {
+                            'input_tokens': input_tokens,
+                            'output_tokens': output_tokens,
+                            'total_tokens': input_tokens + output_tokens
+                        }
+                        
+                        return additional_data
+                    except json.JSONDecodeError:
+                         print("❌ Failed to parse JSON from additional details response")
+                         return {"error": "Invalid JSON in response", "raw_response": content}
+                else:
+                    print("❌ No JSON found in additional details response")
+                    return {"error": "No JSON found in response", "raw_response": content}
+            else:
+                print("❌ No response from Gemini API")
+                return {"error": "No response from Gemini", "result": result}
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ API request failed (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:  # Last attempt
+                return {"error": f"API request failed after {max_retries} attempts: {e}"}
+            continue  # Try again
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON parsing failed (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:  # Last attempt
+                return {"error": f"JSON parsing failed after {max_retries} attempts: {e}"}
+            continue  # Try again
+        except Exception as e:
+            print(f"❌ Unexpected error (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:  # Last attempt
+                return {"error": f"Unexpected error after {max_retries} attempts: {e}"}
+            continue  # Try again
+    
+    # If we get here, all retries failed
+    return {"error": f"All {max_retries} attempts failed"}
 
 def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_info):
-    """Generate exact ikman.lk form submission JSON with fuzzy matching"""
+    """Generate exact ikman.lk form submission JSON using extracted data and ikman classification"""
     
     # Get the form field mappings from our dataset
     form_mappings = vector_dataset.get('form_field_mappings', {})
     
-    # Initialize the form submission structure with ALL fields
-    ai_generated = {}
-    manual_required = []
-    
-    # First, populate ALL fields with "manual_fill_required" as default
-    for field_key, field_info in form_mappings.items():
-        ai_generated[field_key] = "manual_fill_required"
+    # Initialize the form submission structure with ALL fields from the mapping (except description)
+    ai_generated = {field_key: "manual_fill_required" for field_key in form_mappings.keys() if field_key != 'description'}
     
     # Helper function for fuzzy string matching
     def fuzzy_match_string(target, options, threshold=0.6):
@@ -490,8 +735,6 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     best_match = option
         
         return best_match if best_score >= threshold else None
-    
-
 
     # Helper function to generate text for text fields
     def generate_text_field_value(field_key, field_info, extracted_data):
@@ -510,108 +753,59 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             else:
                 return "Standard"
         
-        elif 'description' in field_label:
-            # Generate description based on LLM's extracted data
-            brand = extracted_data.get('brand', 'Car')
-            model = extracted_data.get('model', '')
-            year = extracted_data.get('year', '')
-            condition = extracted_data.get('condition', 'used')
-            color = extracted_data.get('color', '')
-            fuel_type = extracted_data.get('fuel_type', '')
-            body_type = extracted_data.get('body_type', '')
-            transmission = extracted_data.get('transmission', '')
-            engine_capacity = extracted_data.get('engine_capacity', '')
-            
-            description_parts = []
-            if year:
-                description_parts.append(f"{year}")
-            if brand:
-                description_parts.append(brand)
-            if model:
-                description_parts.append(model)
-            if color:
-                description_parts.append(f"{color} color")
-            if body_type:
-                description_parts.append(body_type)
-            if engine_capacity and fuel_type != 'electric':
-                description_parts.append(f"{engine_capacity}CC")
-            if fuel_type:
-                if fuel_type == 'electric':
-                    description_parts.append("electric vehicle")
-                else:
-                    description_parts.append(f"{fuel_type} engine")
-            if transmission:
-                description_parts.append(f"{transmission} transmission")
-            if condition:
-                description_parts.append(f"in {condition} condition")
-            
-            description = " ".join(description_parts)
-            if len(description) > max_length:
-                description = description[:max_length-3] + "..."
-            
-            return description if description else "Well maintained car for sale"
-        
-        else:
-            # Default text generation
-            return "Please specify"
+
     
-    # Process each form field
+    # Map extracted data to form fields using ikman classification
     for field_key, field_info in form_mappings.items():
-        field_type = field_info.get('type')
-        field_label = field_info.get('label', '')
+        field_type = field_info.get('type', 'text')
         
         if field_type == 'enum':
-            # Handle enum fields (condition, body, fuel_type, transmission)
-            field_values = field_info.get('values', [])
-            matched_value = None
-            
+            # Handle enum fields using extracted data and ikman classification
             if field_key == 'condition':
                 condition = extracted_data.get('condition')
                 if condition:
-                    matched_value = fuzzy_match_string(condition, field_values)
+                    condition_values = field_info.get('values', [])
+                    matched_condition = fuzzy_match_string(condition, condition_values, threshold=0.5)
+                    if matched_condition:
+                        ai_generated[field_key] = matched_condition['key']
             
             elif field_key == 'body':
-                body_type = extracted_data.get('body_type')
-                if body_type:
-                    matched_value = fuzzy_match_string(body_type, field_values)
+                body = extracted_data.get('body')
+                if body:
+                    body_values = field_info.get('values', [])
+                    matched_body = fuzzy_match_string(body, body_values, threshold=0.5)
+                    if matched_body:
+                        ai_generated[field_key] = matched_body['key']
             
             elif field_key == 'fuel_type':
-                # Use LLM's intelligent fuel type determination
                 fuel_type = extracted_data.get('fuel_type')
                 if fuel_type:
-                    matched_value = fuzzy_match_string(fuel_type, field_values)
-                # If LLM returned null or no match, don't add the field (manual fill required)
+                    fuel_values = field_info.get('values', [])
+                    matched_fuel = fuzzy_match_string(fuel_type, fuel_values, threshold=0.5)
+                    if matched_fuel:
+                        ai_generated[field_key] = matched_fuel['key']
             
             elif field_key == 'transmission':
-                # Use LLM's intelligent transmission determination
                 transmission = extracted_data.get('transmission')
                 if transmission:
-                    matched_value = fuzzy_match_string(transmission, field_values)
-                # If LLM returned null or no match, don't add the field (manual fill required)
-            
-            # Replace "manual_fill_required" with matched value if we found a match
-            if matched_value:
-                ai_generated[field_key] = matched_value['key']
+                    transmission_values = field_info.get('values', [])
+                    matched_transmission = fuzzy_match_string(transmission, transmission_values, threshold=0.5)
+                    if matched_transmission:
+                        ai_generated[field_key] = matched_transmission['key']
         
         elif field_type == 'tree':
-            # Handle tree fields (brand and model)
+            # Handle tree fields (brand only - model is handled through brand selection)
             if field_key == 'brand':
-                # Use the matched brand from vector search
-                if match_info.get('confidence', 0) > 0.5:
-                    brand_data = match_info.get('matched_brand_data')
-                    if brand_data:
-                        ai_generated[field_key] = brand_data.get('key')
-                    else:
-                        # Try to find brand from extracted data
-                        brand = extracted_data.get('brand')
-                        if brand:
-                            brand_values = field_info.get('values', [])
-                            matched_brand = fuzzy_match_string(brand, brand_values, threshold=0.5)
-                            if matched_brand:
-                                ai_generated[field_key] = matched_brand['key']
+                # Use brand from extracted data
+                brand = extracted_data.get('brand')
+                if brand:
+                    brand_values = field_info.get('values', [])
+                    matched_brand = fuzzy_match_string(brand, brand_values, threshold=0.5)
+                    if matched_brand:
+                        ai_generated[field_key] = matched_brand['key']
         
         elif field_type == 'year':
-            # Handle year fields using LLM's intelligent year estimation
+            # Handle year fields
             if field_key == 'model_year':
                 year = extracted_data.get('year')
                 if year:
@@ -622,29 +816,28 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         
                         if min_year <= year_int <= max_year:
                             ai_generated[field_key] = year_int
-                        # If LLM's year is out of range, keep "manual_fill_required"
                     except (ValueError, TypeError):
-                        pass  # If LLM year is invalid, keep "manual_fill_required"
+                        pass
         
         elif field_type == 'measurement':
-            # Handle measurement fields using LLM's intelligent estimates
+            # Handle measurement fields
             if field_key == 'mileage':
-                # Use LLM's intelligent mileage estimation
-                estimated_mileage = extracted_data.get('estimated_mileage')
-                if estimated_mileage:
+                mileage = extracted_data.get('mileage')
+                mileage_confidence = extracted_data.get('mileage_confidence', 0)
+                
+                # Only use mileage if it's provided AND confidence is very high (0.9+)
+                if mileage and mileage_confidence and mileage_confidence >= 0.9:
                     try:
-                        mileage_int = int(estimated_mileage)
+                        mileage_int = int(mileage)
                         min_mileage = field_info.get('constraints', {}).get('minimum', 0)
                         max_mileage = field_info.get('constraints', {}).get('maximum', 1000000)
                         
                         if min_mileage <= mileage_int <= max_mileage:
                             ai_generated[field_key] = mileage_int
-                        # If LLM's mileage is out of range, keep "manual_fill_required"
                     except (ValueError, TypeError):
-                        pass  # If LLM mileage is invalid, keep "manual_fill_required"
+                        pass
             
             elif field_key == 'engine_capacity':
-                # Use LLM's intelligent engine capacity estimation
                 engine_capacity = extracted_data.get('engine_capacity')
                 if engine_capacity:
                     try:
@@ -654,73 +847,72 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         
                         if min_capacity <= capacity_int <= max_capacity:
                             ai_generated[field_key] = capacity_int
-                        # If LLM's capacity is out of range, keep "manual_fill_required"
                     except (ValueError, TypeError):
-                        pass  # If LLM capacity is invalid, keep "manual_fill_required"
+                        pass
         
         elif field_type == 'money':
-            # Handle money fields using LLM's intelligent price estimation
+            # Handle money fields
             if field_key == 'price':
-                # Use LLM's intelligent price estimation based on Sri Lankan market
-                estimated_price_lkr = extracted_data.get('estimated_price_lkr')
-                if estimated_price_lkr:
+                price = extracted_data.get('price')
+                if price:
                     try:
-                        price_int = int(estimated_price_lkr)
-                        min_price = field_info.get('constraints', {}).get('minimum', 0)
-                        max_price = field_info.get('constraints', {}).get('maximum', 9999999999999)
-                        
-                        if min_price <= price_int <= max_price:
-                            ai_generated[field_key] = price_int
-                        # If LLM's price is out of range, keep "manual_fill_required"
+                        price_int = int(price)
+                        ai_generated[field_key] = price_int
                     except (ValueError, TypeError):
-                        pass  # If LLM price is invalid, keep "manual_fill_required"
-        
-        elif field_type in ['text', 'description']:
-            # Handle text fields - always generate text for all text fields
-            generated_text = generate_text_field_value(field_key, field_info, extracted_data)
-            ai_generated[field_key] = generated_text
-    
-    # Handle brand and model fields specifically
-    # ikman.lk expects both brand and model in the form submission
-    brand = extracted_data.get('brand', '').lower()
-    model = extracted_data.get('model', '').lower()
-    
-    if brand and model:
-        # First try to use matched model data from vector search
-        model_data = match_info.get('matched_model_data')
-        if model_data and model_data.get('model_key'):
-            ai_generated['brand'] = model_data.get('brand_key')
-            ai_generated['model'] = model_data.get('model_key')
-        else:
-            # Fallback: Search through vector entries to find matching brand-model combination
-            for entry in vector_dataset.get('vector_entries', []):
-                if entry.get('type') == 'brand_model':
-                    entry_brand = entry.get('brand_label', '').lower()
-                    entry_model = entry.get('model_label', '').lower()
+                        pass
+                else:
+                    # Provide fallback price estimate based on car characteristics
+                    brand = extracted_data.get('brand', '').lower()
+                    condition = extracted_data.get('condition', '').lower()
+                    year = extracted_data.get('year')
                     
-                    if (brand in entry_brand and model in entry_model):
-                        ai_generated['brand'] = entry.get('brand_key')
-                        ai_generated['model'] = entry.get('model_key')
-                        break
-    elif brand:
-        # If we only have brand, try to match just the brand
-        brand_data = match_info.get('matched_brand_data')
-        if brand_data:
-            ai_generated['brand'] = brand_data.get('key')
-        else:
-            # Fallback: Search for brand in form mappings
-            brand_values = form_mappings.get('brand', {}).get('values', [])
-            matched_brand = fuzzy_match_string(brand, brand_values, threshold=0.5)
-            if matched_brand:
-                ai_generated['brand'] = matched_brand['key']
+                    # Estimate price based on brand and condition
+                    if 'bmw' in brand or 'mercedes' in brand or 'audi' in brand:
+                        # Luxury brand
+                        if 'new' in condition:
+                            estimated_price = 12000000  # 12M LKR for new luxury
+                        else:
+                            estimated_price = 5500000   # 5.5M LKR for used luxury
+                    elif 'toyota' in brand or 'honda' in brand or 'nissan' in brand:
+                        # Mainstream brand
+                        if 'new' in condition:
+                            estimated_price = 8500000   # 8.5M LKR for new mainstream
+                        else:
+                            estimated_price = 3500000   # 3.5M LKR for used mainstream
+                    else:
+                        # Other brands
+                        if 'new' in condition:
+                            estimated_price = 7000000   # 7M LKR for new other
+                        else:
+                            estimated_price = 3000000   # 3M LKR for used other
+                    
+                    # Adjust for year if available
+                    if year and isinstance(year, (int, str)):
+                        try:
+                            year_int = int(year)
+                            current_year = 2024
+                            age = current_year - year_int
+                            if age > 0:
+                                # Reduce price by 10% per year for used cars
+                                depreciation = min(age * 0.1, 0.5)  # Max 50% depreciation
+                                estimated_price = int(estimated_price * (1 - depreciation))
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    ai_generated[field_key] = estimated_price
+        
+        elif field_type == 'text':
+            # Handle text fields (skip description)
+            if field_key != 'description':  # Skip description generation
+                generated_text = generate_text_field_value(field_key, field_info, extracted_data)
+                ai_generated[field_key] = generated_text
     
-    # Build the manual_required list
-    # for field_key, value in ai_generated.items():
-        # if value == "manual_fill_required":
-            # manual_required.append(field_key)
-    
+    # Return the form submission JSON
     return {
-        "ai_generated": ai_generated
+        'ai_generated': ai_generated,
+        'manual_required': [k for k, v in ai_generated.items() if v == "manual_fill_required"],
+        # 'extracted_data': extracted_data,
+        'match_info': match_info
     }
 
 
@@ -846,7 +1038,13 @@ if __name__ == "__main__":
     try:
         print("🔍 Testing FAISS vector search setup...")
         faiss_data = setup_faiss_vector_search(vector_dataset)
-        print(f"✅ FAISS index created with {faiss_data['index'].ntotal} vectors")
+        print(f"✅ FAISS index ready with {faiss_data['index'].ntotal} vectors")
+        print("💾 Using cached embeddings (faster startup)")
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        print("\n💡 To create the vector index, run:")
+        print("   python create_vector_index.py")
+        exit(1)
     except Exception as e:
         print(f"❌ FAISS setup failed: {e}")
         exit(1)
@@ -865,7 +1063,7 @@ if __name__ == "__main__":
     
     print("\n🎉 All tests passed! The system is ready to use.")
     print("\nNext steps:")
-    print("1. Run 'streamlit run streamlit_app.py' to start the web interface")
+    print("1. Run 'streamlit run streamlit_app_v2.py' to start the web interface")
     print("2. Or use the functions directly in your code:")
     print("   from main import process_car_image_end_to_end")
     print("   result = process_car_image_end_to_end('your_image.jpg', vector_dataset)")

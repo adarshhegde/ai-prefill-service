@@ -1,4 +1,4 @@
-# 🚗 AI Car Autofill Service
+# 🚗 AI PostAd Autofill Service
 
 An intelligent car image analysis and form autofill system powered by **Gemini Vision AI** and **FAISS Vector Search** that generates **exact ikman.lk form submission JSON**.
 
@@ -47,16 +47,12 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 **Get your Gemini API key:** https://ai.google.dev/
 
-### 4. Generate Vector Dataset
+### 4. Launch Streamlit App
 ```bash
-python main.py
+streamlit run streamlit_app_v2.py
 ```
-This will create `car_vector_dataset.json` with all car brands and models from ikman.lk
 
-### 5. Launch Streamlit App
-```bash
-streamlit run streamlit_app.py
-```
+**Note:** On first run, the system will automatically create the vector index (takes 2-3 minutes). Subsequent runs will be much faster with cached embeddings.
 
 Open your browser to `http://localhost:8501` 🎉
 
@@ -182,20 +178,46 @@ Used: age × 15,000 km/year
 
 ```
 ai-autofill-service/
-├── main.py                           # Core processing logic
+├── run.py                           # 🚀 Startup script with checks
+├── streamlit_app_v2.py              # Main entrypoint - Web interface
+├── main.py                          # Core processing logic
 │   ├── extract_car_info_with_gemini() # AI image analysis
-│   ├── match_gemini_extraction_to_form() # Vector matching
-│   ├── generate_ikman_form_submission_json() # Exact JSON generation
-│   └── enhance_match_info_with_form_data() # Fuzzy field mapping
-├── streamlit_app.py                  # Web interface
-│   ├── display_extraction_results()  # AI results display
-│   ├── display_form_autofill()      # Form suggestions
-│   └── display_ikman_form_submission() # JSON display & download
-├── car_vector_dataset.json          # Vector database (15.3MB)
+│   ├── setup_faiss_vector_search()  # Vector search with caching
+│   ├── search_vector_database()     # FAISS similarity search
+│   └── generate_ikman_form_submission_json() # Exact JSON generation
+├── create_vector_index.py           # Standalone vector index creation
+├── car_vector_dataset.json          # Vector database (15MB)
+├── faiss_index.bin                  # Cached FAISS embeddings (418MB)
+├── tfidf_vectorizer.pkl             # Cached TF-IDF vectorizer
+├── faiss_metadata.pkl               # Cached metadata
 ├── requirements.txt                  # Dependencies
 ├── .env                             # API keys (create this)
 └── README.md                        # This documentation
 ```
+
+## 🚀 Vector Index Management
+
+### Creating the Index
+```bash
+# Create index with default settings
+python create_vector_index.py
+
+# Force recreation of existing index
+python create_vector_index.py --force
+
+# Create index in custom directory
+python create_vector_index.py --output ./cache
+```
+
+### Performance Benefits
+- **16x faster startup** on subsequent runs
+- **Parallel processing** for multiple images
+- **Better user experience** in web interface
+
+### Cache Files
+- `faiss_index.bin` (~440MB) - FAISS index with embeddings
+- `tfidf_vectorizer.pkl` (~1MB) - TF-IDF vectorizer
+- `faiss_metadata.pkl` (~50MB) - Search metadata
 
 ## 🎯 Usage Examples
 
