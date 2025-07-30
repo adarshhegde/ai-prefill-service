@@ -306,7 +306,6 @@ def render_processing_page():
     st.info(f"🚀 **Processing {total_files} image(s) in parallel** - This will be much faster!")
     
     # Prepare files and schemas
-    st.write("📁 **Preparing files and schemas...**")
     file_paths = []
     filenames = []
     
@@ -323,14 +322,10 @@ def render_processing_page():
                 st.error(f"❌ Failed to save {filename}")
                 continue
         filenames.append(filename)
-        st.write(f"✅ Prepared: {filename}")
     
     if not file_paths:
         st.error("❌ No valid files to process")
         return
-    
-    # No longer need form schema - using new flow
-    st.write("🔄 **New Flow**: Extract brand/model → Vector search → Additional details")
     
     # Ensure vector dataset and faiss data are loaded
     if not st.session_state.vector_dataset or not st.session_state.faiss_data:
@@ -386,9 +381,6 @@ def render_processing_page():
     
     import concurrent.futures
     
-    # Create a progress container
-    progress_container = st.container()
-    
     # Configure parallel processing - reduce workers to avoid rate limiting
     max_workers = min(3, total_files)  # Reduced from 5 to 3
     st.write(f"⚙️ **Parallel workers**: {max_workers} (reduced to avoid API timeouts)")
@@ -412,22 +404,16 @@ def render_processing_page():
             completed += 1
             result = future.result()
             
-            # Update progress
-            with progress_container:
-                progress_percent = (completed / total_files) * 100
-                st.progress(progress_percent / 100)
-                st.write(f"📊 **Progress**: {completed}/{total_files} images processed ({progress_percent:.1f}%)")
-                
-                # Show result for this image
-                if result['success']:
-                    brand = result['extracted_data'].get('brand', 'Unknown')
-                    model = result['extracted_data'].get('model', 'Unknown')
-                    confidence = result['extracted_data'].get('confidence', 0)
-                    st.success(f"✅ **{result['filename']}**: {brand} {model} (confidence: {confidence:.2f})")
-                else:
-                    st.error(f"❌ **{result['filename']}**: {result['extracted_data'].get('error', 'Unknown error')}")
-                
-                extraction_results.append({'extracted_data': result['extracted_data'], 'success': result['success']})
+            # Show result for this image
+            if result['success']:
+                brand = result['extracted_data'].get('brand', 'Unknown')
+                model = result['extracted_data'].get('model', 'Unknown')
+                confidence = result['extracted_data'].get('confidence', 0)
+                st.success(f"✅ **{result['filename']}**: {brand} {model} (confidence: {confidence:.2f})")
+            else:
+                st.error(f"❌ **{result['filename']}**: {result['extracted_data'].get('error', 'Unknown error')}")
+            
+            extraction_results.append({'extracted_data': result['extracted_data'], 'success': result['success']})
     
     # Clean up temporary files
     for file_path in file_paths:
