@@ -7,6 +7,7 @@ from pathlib import Path
 import base64
 import numpy as np
 import pickle
+from datetime import datetime
 
 # Load environment variables
 def load_env_vars():
@@ -20,6 +21,118 @@ def load_env_vars():
                     os.environ[key] = value.strip('"').strip("' ")
 
 load_env_vars()
+
+
+class GeminiCostTracker:
+    """Track and analyze Gemini API costs"""
+    
+    def __init__(self):
+        # Gemini 1.5 Pro pricing (as of 2024)
+        # Input tokens: $1.25 per 1M tokens (≤128k), $2.50 per 1M tokens (>128k)
+        # Output tokens: $5.00 per 1M tokens (≤128k), $10.00 per 1M tokens (>128k)
+        # Images: $0.0025 per image
+        self.input_token_cost_per_1m_128k = 1.25
+        self.input_token_cost_per_1m_above_128k = 2.50
+        self.output_token_cost_per_1m_128k = 5.00
+        self.output_token_cost_per_1m_above_128k = 10.00
+        self.image_cost_per_image = 0.0025
+        
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.total_images = 0
+        self.total_cost = 0.0
+        self.requests = []
+    
+    def add_request(self, input_tokens, output_tokens, images=1, request_type="vision"):
+        """Add a request to the cost tracker"""
+        # Determine pricing tier based on input token count
+        if input_tokens <= 128000:
+            input_cost_per_1m = self.input_token_cost_per_1m_128k
+            output_cost_per_1m = self.output_token_cost_per_1m_128k
+        else:
+            input_cost_per_1m = self.input_token_cost_per_1m_above_128k
+            output_cost_per_1m = self.output_token_cost_per_1m_above_128k
+        
+        input_cost = (input_tokens / 1_000_000) * input_cost_per_1m
+        output_cost = (output_tokens / 1_000_000) * output_cost_per_1m
+        image_cost = images * self.image_cost_per_image
+        total_request_cost = input_cost + output_cost + image_cost
+        
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+        self.total_images += images
+        self.total_cost += total_request_cost
+        
+        request_data = {
+            'timestamp': datetime.now().isoformat(),
+            'request_type': request_type,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'images': images,
+            'input_cost': input_cost,
+            'output_cost': output_cost,
+            'image_cost': image_cost,
+            'total_cost': total_request_cost
+        }
+        self.requests.append(request_data)
+        
+        return total_request_cost
+    
+    def get_cost_summary(self):
+        """Get a summary of all costs"""
+        # Calculate cost breakdown by request type
+        cost_by_type = {}
+        for req in self.requests:
+            req_type = req['request_type']
+            if req_type not in cost_by_type:
+                cost_by_type[req_type] = {
+                    'count': 0,
+                    'total_cost': 0,
+                    'total_input_tokens': 0,
+                    'total_output_tokens': 0
+                }
+            cost_by_type[req_type]['count'] += 1
+            cost_by_type[req_type]['total_cost'] += req['total_cost']
+            cost_by_type[req_type]['total_input_tokens'] += req['input_tokens']
+            cost_by_type[req_type]['total_output_tokens'] += req['output_tokens']
+        
+        return {
+            'total_input_tokens': self.total_input_tokens,
+            'total_output_tokens': self.total_output_tokens,
+            'total_images': self.total_images,
+            'total_cost_usd': self.total_cost,
+            'average_cost_per_request': self.total_cost / len(self.requests) if self.requests else 0,
+            'total_requests': len(self.requests),
+            'cost_by_type': cost_by_type
+        }
+    
+    def print_cost_summary(self):
+        """Print a formatted cost summary"""
+        summary = self.get_cost_summary()
+        print("\n💰 Gemini API Cost Analysis")
+        print("=" * 40)
+        print(f"Total Requests: {summary['total_requests']}")
+        print(f"Total Input Tokens: {summary['total_input_tokens']:,}")
+        print(f"Total Output Tokens: {summary['total_output_tokens']:,}")
+        print(f"Total Images: {summary['total_images']}")
+        print(f"Total Cost: ${summary['total_cost_usd']:.4f}")
+        print(f"Average Cost per Request: ${summary['average_cost_per_request']:.4f}")
+        
+        # Show breakdown by request type
+        if summary['cost_by_type']:
+            print("\n📊 Cost Breakdown by Request Type:")
+            for req_type, data in summary['cost_by_type'].items():
+                print(f"  {req_type}: {data['count']} requests, ${data['total_cost']:.4f}")
+                print(f"    Input: {data['total_input_tokens']:,} tokens, Output: {data['total_output_tokens']:,} tokens")
+        
+        if self.requests:
+            print("\n📊 Recent Requests:")
+            for i, req in enumerate(self.requests[-5:], 1):  # Show last 5 requests
+                print(f"  {i}. {req['request_type']}: {req['input_tokens']}→{req['output_tokens']} tokens, ${req['total_cost']:.4f}")
+
+
+# Global cost tracker instance
+cost_tracker = GeminiCostTracker()
 
 
 def setup_gemini_client():
@@ -36,6 +149,76 @@ def encode_image_to_base64(image_path):
         return base64.b64encode(image_file.read()).decode('utf-8')
 
 
+def process_multiple_identifications(extracted_data):
+    """Process multiple car identifications and select the best one based on confidence"""
+    
+    # Start with the primary identification
+    primary_identification = {
+        'brand': extracted_data.get('brand', 'unknown'),
+        'model': extracted_data.get('model', 'unknown'),
+        'confidence': float(extracted_data.get('confidence', 0))
+    }
+    
+    # Get alternative identifications
+    alternatives = extracted_data.get('alternative_identifications', [])
+    
+    # Create a list of all identifications including primary
+    all_identifications = [primary_identification] + alternatives
+    
+    # Filter out invalid identifications
+    valid_identifications = []
+    for identification in all_identifications:
+        brand = identification.get('brand', '').strip()
+        model = identification.get('model', '').strip()
+        confidence = float(identification.get('confidence', 0))
+        
+        # Skip if brand or model is unknown/empty
+        if brand.lower() in ['unknown', ''] or model.lower() in ['unknown', '']:
+            continue
+            
+        # Skip if confidence is too low
+        if confidence < 0.1:
+            continue
+            
+        valid_identifications.append({
+            'brand': brand,
+            'model': model,
+            'confidence': confidence
+        })
+    
+    if not valid_identifications:
+        # Fallback to primary identification even if low confidence
+        return {
+            'brand': primary_identification['brand'],
+            'model': primary_identification['model'],
+            'confidence': primary_identification['confidence'],
+            'all_identifications': [primary_identification]
+        }
+    
+    # Sort by confidence (highest first)
+    valid_identifications.sort(key=lambda x: x['confidence'], reverse=True)
+    
+    # Select the best identification
+    best_identification = valid_identifications[0]
+    
+    # Log the selection process
+    if len(valid_identifications) > 1:
+        print(f"🔍 Multiple identifications found:")
+        for i, identification in enumerate(valid_identifications[:3]):  # Show top 3
+            print(f"   {i+1}. {identification['brand']} {identification['model']} (confidence: {identification['confidence']:.2f})")
+        print(f"✅ Selected: {best_identification['brand']} {best_identification['model']} (highest confidence: {best_identification['confidence']:.2f})")
+    else:
+        print(f"✅ Single identification: {best_identification['brand']} {best_identification['model']} (confidence: {best_identification['confidence']:.2f})")
+    
+    return {
+        'brand': best_identification['brand'],
+        'model': best_identification['model'],
+        'confidence': best_identification['confidence'],
+        'all_identifications': valid_identifications,
+        'selection_method': 'highest_confidence'
+    }
+
+
 def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_results=None, max_retries=3):
     """Extract car information from image using Gemini Vision API with retry logic"""
     
@@ -45,20 +228,29 @@ def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_res
     print("📸 Encoding image for Gemini API...")
     image_base64 = encode_image_to_base64(image_path)
     
-    # Simple prompt - just extract brand and model, no constraints
+    # Enhanced prompt to get multiple possible identifications
     prompt = """
     Analyze this car image and extract the brand and model. Return ONLY a JSON object with this structure:
 
     {
         "brand": "car brand (e.g., Toyota, Honda, BMW)",
         "model": "car model (e.g., Corolla, Civic, 3 Series)",
-        "confidence": "confidence level (0.0 to 1.0)"
+        "confidence": "confidence level (0.0 to 1.0)",
+        "alternative_identifications": [
+            {
+                "brand": "alternative brand",
+                "model": "alternative model", 
+                "confidence": "confidence level (0.0 to 1.0)"
+            }
+        ]
     }
 
     Guidelines:
     - Be specific with model names (e.g., "Corolla" not just "Toyota")
     - If you can't identify clearly, use "unknown" for brand or model
     - Focus on the most prominent car in the image
+    - Include alternative identifications if you're uncertain between similar models
+    - Only include alternatives with confidence > 0.3
     """
     
     # Make API request to Gemini Pro
@@ -115,6 +307,10 @@ def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_res
                 input_tokens = usage_info.get('promptTokenCount', 0)
                 output_tokens = usage_info.get('candidatesTokenCount', 0)
                 
+                # Track API costs
+                request_cost = cost_tracker.add_request(input_tokens, output_tokens, images=1, request_type="brand_extraction")
+                print(f"💰 Request cost: ${request_cost:.4f}")
+                
                 # Debug: Print actual token counts
                 print(f"🔍 Token Usage Debug: input={input_tokens:,}, output={output_tokens:,}")
                 
@@ -129,14 +325,18 @@ def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_res
                         extracted_data = json.loads(json_match.group(1))
                         print(f"🎯 Extracted: {extracted_data.get('brand', 'Unknown')} {extracted_data.get('model', 'Unknown')}")
                         
+                        # Process multiple identifications and select the best one
+                        processed_data = process_multiple_identifications(extracted_data)
+                        
                         # Add token usage to the response
-                        extracted_data['_token_usage'] = {
+                        processed_data['_token_usage'] = {
                             'input_tokens': input_tokens,
                             'output_tokens': output_tokens,
-                            'total_tokens': input_tokens + output_tokens
+                            'total_tokens': input_tokens + output_tokens,
+                            'cost_usd': request_cost
                         }
                         
-                        return extracted_data
+                        return processed_data
                     except json.JSONDecodeError:
                          print("❌ Failed to parse JSON from Gemini response")
                          return {"error": "Invalid JSON in response", "raw_response": content}
@@ -206,6 +406,10 @@ def get_preliminary_query(image_path):
             input_tokens = usage_info.get('promptTokenCount', 0)
             output_tokens = usage_info.get('candidatesTokenCount', 0)
             
+            # Track API costs
+            request_cost = cost_tracker.add_request(input_tokens, output_tokens, images=1, request_type="preliminary_query")
+            print(f"💰 Preliminary query cost: ${request_cost:.4f}")
+            
             # Debug: Print actual token counts
             print(f"🔍 Preliminary Query Token Debug: input={input_tokens:,}, output={output_tokens:,}")
             
@@ -215,7 +419,8 @@ def get_preliminary_query(image_path):
                     'token_usage': {
                         'input_tokens': input_tokens,
                         'output_tokens': output_tokens,
-                        'total_tokens': input_tokens + output_tokens
+                        'total_tokens': input_tokens + output_tokens,
+                        'cost_usd': request_cost
                     }
                 }
     except Exception:
@@ -502,7 +707,7 @@ def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
     """Complete end-to-end processing: image -> extraction -> form autofill"""
     print(f"🚗 Processing car image: {image_path}")
     
-    # Step 1: Extract brand/model with Gemini (simple, no constraints)
+    # Step 1: Extract brand/model with Gemini (with multiple identifications)
     print("📸 Step 1: Extracting brand and model with Gemini Vision...")
     extracted_data = extract_car_info_with_gemini(image_path)
     
@@ -514,8 +719,8 @@ def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
     print(f"   Model: {extracted_data.get('model', 'Unknown')}")
     print(f"   Confidence: {extracted_data.get('confidence', 0)}")
     
-    # Step 2: Vector search to find matching car in our dataset
-    print("\n🔍 Step 2: Vector search for matching car...")
+    # Step 2: Vector search to find exact brand/model keys from our classification
+    print("\n🔍 Step 2: Vector search for exact brand/model keys...")
     query = f"{extracted_data.get('brand', '')} {extracted_data.get('model', '')}".strip()
     faiss_data = setup_faiss_vector_search(vector_dataset)
     vector_results = search_vector_database(query, faiss_data, top_k=5)
@@ -528,29 +733,58 @@ def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
         print("⚠️ No vector search matches found")
         best_match = None
     
-    # Step 3: Generate form fields using matched data + image analysis
-    print("\n📝 Step 3: Generating form fields...")
-    ikman_form_json = generate_ikman_form_submission_json(extracted_data, vector_dataset, {'match': best_match})
+    # Step 3: Get available field values from form mappings
+    print("\n📋 Step 3: Getting available field values...")
+    form_mappings = vector_dataset.get('form_field_mappings', {})
+    available_values = {}
+    
+    for field_key, field_info in form_mappings.items():
+        if field_info.get('type') == 'enum':
+            available_values[field_key] = [v['label'] for v in field_info.get('values', [])]
+        elif field_info.get('type') == 'tree':
+            available_values[field_key] = [v['label'] for v in field_info.get('values', [])]
+    
+    print(f"   Available values for {len(available_values)} fields")
+    
+    # Step 4: Extract additional details with exact available values
+    print("\n🔍 Step 4: Extracting additional details with exact values...")
+    additional_data = extract_additional_details_with_gemini(image_path, best_match, vector_dataset)
+    
+    if 'error' in additional_data:
+        print(f"❌ Additional details extraction failed: {additional_data['error']}")
+        additional_data = {}
+    
+    # Step 5: Generate form fields using vector search results + additional details
+    print("\n📝 Step 5: Generating form fields...")
+    ikman_form_json = generate_ikman_form_submission_json(
+        {**extracted_data, **additional_data}, 
+        vector_dataset, 
+        {'match': best_match, 'available_values': available_values}
+    )
     
     print("✅ Form JSON generation completed")
     print(f"   Generated {len(ikman_form_json['ai_generated'])} form fields")
     
+    # Print cost summary at the end
+    cost_tracker.print_cost_summary()
+    
     return {
         'extracted_data': extracted_data,
+        'additional_data': additional_data,
         'vector_results': vector_results,
         'ikman_form_submission': ikman_form_json
     }
 
 def extract_additional_details_with_gemini(image_path, matched_car_info, vector_dataset, max_retries=3):
-    """Extract additional details from image using matched car information and ikman classification data"""
+    """Extract additional details from image using matched car information and exact available values"""
     api_key = setup_gemini_client()
     image_base64 = encode_image_to_base64(image_path)
     
-    # Create prompt with matched car context and ikman classification data
-    brand = matched_car_info.get('brand_label', 'Unknown')
-    model = matched_car_info.get('model_label', 'Unknown')
+    # Create prompt with matched car context and exact available values
+    brand = matched_car_info.get('brand_label', 'Unknown') if matched_car_info else 'Unknown'
+    model = matched_car_info.get('model_label', 'Unknown') if matched_car_info else 'Unknown'
     
-    # Get ikman classification data
+    # Get exact available values from form mappings
     form_mappings = vector_dataset.get('form_field_mappings', {})
     condition_values = [v['label'] for v in form_mappings.get('condition', {}).get('values', [])]
     body_values = [v['label'] for v in form_mappings.get('body', {}).get('values', [])]
@@ -572,13 +806,14 @@ def extract_additional_details_with_gemini(image_path, matched_car_info, vector_
         "color": "primary exterior color",
         "year": "estimated manufacturing year (YYYY format)",
         "price": "estimated price in LKR (provide reasonable estimate based on brand, model, year, and condition)",
-        "engine_capacity": "engine capacity in cc (e.g., 1500, 2000, or null for electric)",
-        "visible_features": ["list of visible features like alloy wheels, sunroof, etc."]
+        "engine_capacity": "engine capacity in cc (e.g., 1500, 2000, or null for electric)"
     }}
 
+    CRITICAL: You MUST use EXACT values from the provided lists. Do not use synonyms or variations.
     Guidelines:
-    - Use EXACT values from the lists provided
+    - Use EXACT values from the lists provided - no exceptions
     - Only extract mileage if dashboard/odometer is clearly visible and readable
+    - Evlauate if car is a hybrid or electric or petrol or diesel or CNG or LPG or hydrogen or other fuel type
     - For price estimation: Provide reasonable estimates based on brand, model, year, and condition
     - Focus on clearly visible information
     - For electric vehicles, set engine_capacity to null, and transmission to automatic
@@ -638,6 +873,10 @@ def extract_additional_details_with_gemini(image_path, matched_car_info, vector_
                 input_tokens = usage_info.get('promptTokenCount', 0)
                 output_tokens = usage_info.get('candidatesTokenCount', 0)
                 
+                # Track API costs
+                request_cost = cost_tracker.add_request(input_tokens, output_tokens, images=1, request_type="additional_details")
+                print(f"💰 Additional details cost: ${request_cost:.4f}")
+                
                 # Debug: Print actual token counts
                 print(f"🔍 Additional Details Token Debug: input={input_tokens:,}, output={output_tokens:,}")
                 
@@ -655,7 +894,8 @@ def extract_additional_details_with_gemini(image_path, matched_car_info, vector_
                         additional_data['_token_usage'] = {
                             'input_tokens': input_tokens,
                             'output_tokens': output_tokens,
-                            'total_tokens': input_tokens + output_tokens
+                            'total_tokens': input_tokens + output_tokens,
+                            'cost_usd': request_cost
                         }
                         
                         return additional_data
@@ -693,6 +933,14 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
     
     # Get the form field mappings from our dataset
     form_mappings = vector_dataset.get('form_field_mappings', {})
+    
+    # Add model field to form mappings if it doesn't exist
+    if 'model' not in form_mappings:
+        form_mappings['model'] = {
+            'type': 'tree',
+            'label': 'Model',
+            'values': []  # Will be populated from brand's tree structure
+        }
     
     # Initialize the form submission structure with ALL fields from the mapping (except description)
     ai_generated = {field_key: "manual_fill_required" for field_key in form_mappings.keys() if field_key != 'description'}
@@ -743,17 +991,40 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
         max_length = field_info.get('maximum_length', 100)
         
         if 'edition' in field_label or 'trim' in field_label:
-            # Try to extract edition/trim info from model or generate based on brand
+            # Extract only the trim level from the model name
             model = extracted_data.get('model', '')
             brand = extracted_data.get('brand', '')
-            if model and len(model) <= max_length:
-                return model
+            
+            # Common trim levels to extract
+            trim_levels = ['Sport', 'Limited', 'Premium', 'SE', 'LE', 'XLE', 'SR', 'SR5', 'TRD', 'GT', 'GTS', 'RS', 'S', 'X', 'LX', 'EX', 'DX', 'GL', 'GLX', 'GLS', 'GLI', 'TDI', 'TSI', 'GTI', 'R', 'AMG', 'M', 'S', 'RS', 'Quattro', '4Matic', 'xDrive', 'AWD', '4WD']
+            
+            if model:
+                # Try to extract trim level from model name
+                model_lower = model.lower()
+                for trim in trim_levels:
+                    if trim.lower() in model_lower:
+                        return trim
+                
+                # If no trim found, try to extract the last word as trim
+                model_words = model.split()
+                if len(model_words) > 1:
+                    last_word = model_words[-1]
+                    # Check if last word looks like a trim level
+                    if len(last_word) <= 6 and last_word.isupper() or last_word in trim_levels:
+                        return last_word
+                
+                # If still no trim, return a generic edition
+                return "Standard"
             elif brand and len(brand) <= max_length:
                 return f"{brand} Edition"
             else:
                 return "Standard"
         
 
+    
+    # Debug: Print available form fields
+    print(f"🔍 Available form fields: {list(form_mappings.keys())}")
+    print(f"🔍 Extracted model: {extracted_data.get('model')}")
     
     # Map extracted data to form fields using ikman classification
     for field_key, field_info in form_mappings.items():
@@ -768,6 +1039,12 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_condition = fuzzy_match_string(condition, condition_values, threshold=0.5)
                     if matched_condition:
                         ai_generated[field_key] = matched_condition['key']
+                    else:
+                        # Condition was extracted but couldn't be matched to form values
+                        ai_generated[field_key] = "manual_fill_required"
+                else:
+                    # No condition extracted
+                    ai_generated[field_key] = "manual_fill_required"
             
             elif field_key == 'body':
                 body = extracted_data.get('body')
@@ -776,6 +1053,12 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_body = fuzzy_match_string(body, body_values, threshold=0.5)
                     if matched_body:
                         ai_generated[field_key] = matched_body['key']
+                    else:
+                        # Body type was extracted but couldn't be matched to form values
+                        ai_generated[field_key] = "manual_fill_required"
+                else:
+                    # No body type extracted
+                    ai_generated[field_key] = "manual_fill_required"
             
             elif field_key == 'fuel_type':
                 fuel_type = extracted_data.get('fuel_type')
@@ -784,6 +1067,12 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_fuel = fuzzy_match_string(fuel_type, fuel_values, threshold=0.5)
                     if matched_fuel:
                         ai_generated[field_key] = matched_fuel['key']
+                    else:
+                        # Fuel type was extracted but couldn't be matched to form values
+                        ai_generated[field_key] = "manual_fill_required"
+                else:
+                    # No fuel type extracted
+                    ai_generated[field_key] = "manual_fill_required"
             
             elif field_key == 'transmission':
                 transmission = extracted_data.get('transmission')
@@ -792,9 +1081,15 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_transmission = fuzzy_match_string(transmission, transmission_values, threshold=0.5)
                     if matched_transmission:
                         ai_generated[field_key] = matched_transmission['key']
+                    else:
+                        # Transmission was extracted but couldn't be matched to form values
+                        ai_generated[field_key] = "manual_fill_required"
+                else:
+                    # No transmission extracted
+                    ai_generated[field_key] = "manual_fill_required"
         
         elif field_type == 'tree':
-            # Handle tree fields (brand only - model is handled through brand selection)
+            # Handle tree fields (brand and model)
             if field_key == 'brand':
                 # Use brand from extracted data
                 brand = extracted_data.get('brand')
@@ -803,6 +1098,87 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_brand = fuzzy_match_string(brand, brand_values, threshold=0.5)
                     if matched_brand:
                         ai_generated[field_key] = matched_brand['key']
+                    else:
+                        # Brand was extracted but couldn't be matched to form values
+                        ai_generated[field_key] = "manual_fill_required"
+                else:
+                    # No brand extracted
+                    ai_generated[field_key] = "manual_fill_required"
+            
+            elif field_key == 'model':
+                # Use model from extracted data
+                model = extracted_data.get('model')
+                brand = extracted_data.get('brand', '')
+                print(f"🔍 Processing model field: {model} for brand: {brand}")
+                
+                if model and brand:
+                    # Search vector dataset for brand-model combination
+                    search_query = f"{brand.lower()}-{model.lower()}"
+                    print(f"🔍 Searching vector dataset for: {search_query}")
+                    
+                    # Setup FAISS and search
+                    faiss_data = setup_faiss_vector_search(vector_dataset)
+                    search_results = search_vector_database(search_query, faiss_data, top_k=5)
+                    
+                    # Look for brand-model match with fuzzy matching
+                    matched_model_key = None
+                    print(f"🔍 Checking {len(search_results)} search results...")
+                    
+                    for i, result in enumerate(search_results):
+                        metadata = result['metadata']
+                        result_brand = metadata.get('brand_label', '').lower()
+                        result_model = metadata.get('model_label', '').lower()
+                        search_brand = brand.lower()
+                        search_model = model.lower()
+                        
+                        print(f"   {i+1}. {result_brand} {result_model} (type: {metadata.get('type')})")
+                        
+                        # Check if brand matches exactly
+                        if (metadata.get('type') == 'brand_model' and 
+                            result_brand == search_brand):
+                            
+                            # Check for model match (exact or partial)
+                            model_match = False
+                            if result_model == search_model:
+                                # Exact match
+                                model_match = True
+                                match_type = "exact"
+                            elif search_model in result_model or result_model in search_model:
+                                # Partial match (e.g., "C3" in "e-c3" or "e-c3" in "C3")
+                                model_match = True
+                                match_type = "partial"
+                            elif any(word in result_model for word in search_model.split()) or any(word in search_model for word in result_model.split()):
+                                # Word overlap (e.g., "Pajero Sport" vs "Pajero")
+                                model_match = True
+                                match_type = "word_overlap"
+                            
+                            if model_match:
+                                matched_model_key = metadata.get('model_key')
+                                print(f"✅ Found {match_type} match: {metadata.get('brand_label')} {metadata.get('model_label')} -> key: {matched_model_key}")
+                                break
+                    
+                    if matched_model_key:
+                        ai_generated[field_key] = matched_model_key
+                        print(f"✅ Using vector DB key for model: {matched_model_key}")
+                    else:
+                        print(f"❌ No exact match found in vector DB for: {brand} {model}")
+                        # Try fuzzy matching with form values if available
+                        model_values = field_info.get('values', [])
+                        if model_values:
+                            matched_model = fuzzy_match_string(model, model_values, threshold=0.5)
+                            if matched_model:
+                                ai_generated[field_key] = matched_model['key']
+                                print(f"✅ Using fuzzy match key for model: {matched_model['key']}")
+                            else:
+                                ai_generated[field_key] = "manual_fill_required"
+                                print(f"❌ No fuzzy match found, setting to manual_fill_required")
+                        else:
+                            # No predefined model values, set to manual_fill_required
+                            ai_generated[field_key] = "manual_fill_required"
+                            print(f"❌ No model values available, setting to manual_fill_required")
+                else:
+                    # No model or brand extracted
+                    ai_generated[field_key] = "manual_fill_required"
         
         elif field_type == 'year':
             # Handle year fields
@@ -907,12 +1283,20 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                 generated_text = generate_text_field_value(field_key, field_info, extracted_data)
                 ai_generated[field_key] = generated_text
     
+    # Check if model was extracted but not in form mappings
+    manual_required = [k for k, v in ai_generated.items() if v == "manual_fill_required"]
+    
+    # If model was extracted but not in form mappings, add it to manual_required
+    extracted_model = extracted_data.get('model')
+    if extracted_model and 'model' not in form_mappings:
+        manual_required.append('model')
+    
     # Return the form submission JSON
     return {
         'ai_generated': ai_generated,
-        'manual_required': [k for k, v in ai_generated.items() if v == "manual_fill_required"],
+        'manual_required': manual_required,
         # 'extracted_data': extracted_data,
-        'match_info': match_info
+        # 'match_info': match_info
     }
 
 
@@ -1002,6 +1386,206 @@ def process_multiple_images(image_paths, vector_dataset):
     
     return results
 
+def process_car_images_batch(image_paths, vector_dataset, batch_size=3, max_retries=3):
+    """Process multiple car images in batches for cost efficiency"""
+    
+    if len(image_paths) <= batch_size:
+        # Small batch - use individual processing for accuracy
+        print(f"📸 Processing {len(image_paths)} images individually...")
+        return process_multiple_images(image_paths, vector_dataset)
+    
+    print(f"🚀 Processing {len(image_paths)} images in batches of {batch_size}...")
+    
+    api_key = setup_gemini_client()
+    all_results = {}
+    
+    # Process in batches
+    for batch_idx in range(0, len(image_paths), batch_size):
+        batch_paths = image_paths[batch_idx:batch_idx + batch_size]
+        print(f"\n📦 Processing batch {batch_idx//batch_size + 1}/{(len(image_paths) + batch_size - 1)//batch_size}")
+        print(f"   Images: {[os.path.basename(p) for p in batch_paths]}")
+        
+        # Encode all images in batch
+        batch_images = []
+        for image_path in batch_paths:
+            try:
+                image_base64 = encode_image_to_base64(image_path)
+                batch_images.append(image_base64)
+            except Exception as e:
+                print(f"❌ Error encoding {image_path}: {e}")
+                all_results[image_path] = {"error": f"Image encoding failed: {e}"}
+                continue
+        
+        if not batch_images:
+            continue
+        
+        # Create batch prompt - ONLY brand and model identification
+        batch_prompt = f"""
+        Analyze these {len(batch_images)} car images and extract ONLY brand and model for each.
+        Return ONLY a JSON array with one object per image in the same order:
+
+        [
+            {{
+                "image_index": 0,
+                "brand": "car brand (e.g., Toyota, Honda, BMW)",
+                "model": "car model (e.g., Corolla, Civic, 3 Series)",
+                "confidence": "confidence level (0.0 to 1.0)"
+            }},
+            // ... one object per image in order
+        ]
+
+        Guidelines:
+        - Be specific with model names (e.g., "Corolla" not just "Toyota")
+        - If you can't identify clearly, use "unknown" for brand or model
+        - Focus on the most prominent car in each image
+        - Return exactly {len(batch_images)} objects in the array
+        - ONLY extract brand and model - no other details
+        """
+        
+        # Prepare batch payload
+        parts = [{"text": batch_prompt}]
+        for image_base64 in batch_images:
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": image_base64
+                }
+            })
+        
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "temperature": 0.0,
+                "topK": 1,
+                "topP": 0.95,
+                "maxOutputTokens": 2048,
+                "candidateCount": 1
+            }
+        }
+        
+        # Make batch API request with retry logic
+        batch_success = False
+        for attempt in range(max_retries):
+            try:
+                print(f"🤖 Sending batch request... (attempt {attempt + 1}/{max_retries})")
+                start_time = time.time()
+                
+                if attempt > 0:
+                    delay = min(2 ** attempt, 10)
+                    print(f"⏳ Waiting {delay}s before retry...")
+                    time.sleep(delay)
+                
+                response = requests.post(url, json=payload, timeout=120)  # Increased timeout for batch
+                response.raise_for_status()
+                
+                api_duration = time.time() - start_time
+                print(f"📊 Processing batch response... (took {api_duration:.1f}s)")
+                result = response.json()
+                
+                if 'candidates' in result and result['candidates']:
+                    content = result['candidates'][0]['content']['parts'][0]['text']
+                    
+                    # Extract token usage
+                    usage_info = result.get('usageMetadata', {})
+                    input_tokens = usage_info.get('promptTokenCount', 0)
+                    output_tokens = usage_info.get('candidatesTokenCount', 0)
+                    
+                    # Track API costs
+                    request_cost = cost_tracker.add_request(input_tokens, output_tokens, images=len(batch_images), request_type="batch_processing")
+                    print(f"💰 Batch cost: ${request_cost:.4f} ({len(batch_images)} images)")
+                    
+                    # Parse JSON response
+                    import re
+                    json_match = re.search(r'```json\n(\[.*?\])\n```', content, re.DOTALL)
+                    if not json_match:
+                        json_match = re.search(r'(\[.*?\])', content, re.DOTALL)
+                    
+                    if json_match:
+                        try:
+                            batch_data = json.loads(json_match.group(1))
+                            
+                            if isinstance(batch_data, list) and len(batch_data) == len(batch_paths):
+                                print(f"✅ Successfully processed batch of {len(batch_data)} images")
+                                
+                                # Distribute results to individual image paths
+                                for i, (image_path, car_data) in enumerate(zip(batch_paths, batch_data)):
+                                    # Add token usage and cost info
+                                    car_data['_token_usage'] = {
+                                        'input_tokens': input_tokens // len(batch_images),  # Approximate per image
+                                        'output_tokens': output_tokens // len(batch_images),
+                                        'total_tokens': (input_tokens + output_tokens) // len(batch_images),
+                                        'cost_usd': request_cost / len(batch_images)
+                                    }
+                                    
+                                    # Process with vector search
+                                    query = f"{car_data.get('brand', '')} {car_data.get('model', '')}".strip()
+                                    faiss_data = setup_faiss_vector_search(vector_dataset)
+                                    vector_results = search_vector_database(query, faiss_data, top_k=3)
+                                    
+                                    # Extract additional details with exact available values
+                                    best_match = vector_results[0] if vector_results else None
+                                    additional_data = extract_additional_details_with_gemini(image_path, best_match, vector_dataset)
+                                    
+                                    if 'error' in additional_data:
+                                        print(f"❌ Additional details extraction failed for {os.path.basename(image_path)}: {additional_data['error']}")
+                                        additional_data = {}
+                                    
+                                    # Generate form JSON with combined data
+                                    combined_data = {**car_data, **additional_data}
+                                    ikman_form_json = generate_ikman_form_submission_json(combined_data, vector_dataset, {'match': best_match})
+                                    
+                                    all_results[image_path] = {
+                                        'extracted_data': car_data,
+                                        'additional_data': additional_data,
+                                        'vector_results': vector_results,
+                                        'ikman_form_submission': ikman_form_json
+                                    }
+                                    
+                                    brand = car_data.get('brand', 'Unknown')
+                                    model = car_data.get('model', 'Unknown')
+                                    confidence = car_data.get('confidence', 0)
+                                    print(f"   ✅ {os.path.basename(image_path)}: {brand} {model} (confidence: {confidence:.2f})")
+                                
+                                batch_success = True
+                                break
+                            else:
+                                print(f"❌ Invalid batch response format: expected {len(batch_paths)} items, got {len(batch_data) if isinstance(batch_data, list) else 'non-list'}")
+                                
+                        except json.JSONDecodeError as e:
+                            print(f"❌ Failed to parse batch JSON: {e}")
+                            print(f"Raw response: {content[:200]}...")
+                    else:
+                        print("❌ No JSON array found in batch response")
+                        
+                else:
+                    print("❌ No response from Gemini API")
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"❌ Batch API request failed (attempt {attempt + 1}): {e}")
+                if attempt == max_retries - 1:
+                    # Fallback to individual processing for this batch
+                    print(f"🔄 Falling back to individual processing for batch...")
+                    batch_results = process_multiple_images(batch_paths, vector_dataset)
+                    all_results.update(batch_results)
+            except Exception as e:
+                print(f"❌ Unexpected error in batch processing (attempt {attempt + 1}): {e}")
+                if attempt == max_retries - 1:
+                    # Fallback to individual processing for this batch
+                    print(f"🔄 Falling back to individual processing for batch...")
+                    batch_results = process_multiple_images(batch_paths, vector_dataset)
+                    all_results.update(batch_results)
+        
+        if not batch_success:
+            print(f"❌ Batch processing failed, using individual processing...")
+            batch_results = process_multiple_images(batch_paths, vector_dataset)
+            all_results.update(batch_results)
+    
+    # Print final cost summary
+    cost_tracker.print_cost_summary()
+    
+    return all_results
+
 
 if __name__ == "__main__":
     """Main execution block for testing and demonstration"""
@@ -1067,3 +1651,6 @@ if __name__ == "__main__":
     print("2. Or use the functions directly in your code:")
     print("   from main import process_car_image_end_to_end")
     print("   result = process_car_image_end_to_end('your_image.jpg', vector_dataset)")
+    print("3. For batch processing (cost efficient):")
+    print("   from main import process_car_images_batch")
+    print("   results = process_car_images_batch(['img1.jpg', 'img2.jpg', 'img3.jpg'], vector_dataset)")
