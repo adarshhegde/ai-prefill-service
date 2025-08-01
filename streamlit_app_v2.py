@@ -551,6 +551,19 @@ def render_results_page():
         with col2:    
             # Use the ai_generated data from the JSON for readable format
             ai_generated_data = display_json.get('ai_generated', {})
+            field_confidence_scores = display_json.get('field_confidence_scores', {})
+            
+            # Helper function to get confidence level and color
+            def get_confidence_indicator(confidence_score):
+                if confidence_score >= 0.8:
+                    return "🟢", "High", "#28a745"  # Green
+                elif confidence_score >= 0.6:
+                    return "🟡", "Medium", "#ffc107"  # Yellow
+                elif confidence_score >= 0.3:
+                    return "🟠", "Low", "#fd7e14"  # Orange
+                else:
+                    return "🔴", "Very Low", "#dc3545"  # Red
+            
             # Field mapping for better labels
             field_labels = {
                 'condition': '🚗 Condition',
@@ -571,13 +584,16 @@ def render_results_page():
             
             # Create a container for consistent styling
             with st.container():
-                # Display each field with consistent styling
+                st.write("**📊 AI Generated Fields with Confidence Scores**")
+                
+                # Display each field with confidence indicators
                 for field_key, field_value in ai_generated_data.items():
                     # Skip internal confidence fields that shouldn't be displayed
                     if field_key in ['mileage_confidence']:
                         continue
                     if field_value and field_value != "manual_fill_required":
                         label = field_labels.get(field_key, field_key.replace('_', ' ').title())
+                        confidence_score = field_confidence_scores.get(field_key, 0.0)
                         
                         # Format the value based on field type
                         if field_key == 'price' and field_value:
@@ -612,25 +628,83 @@ def render_results_page():
                         else:
                             formatted_value = str(field_value) if field_value else "Not specified"
                         
-                        # Consistent styling for all fields
-                        st.markdown(f"**{label}**: {formatted_value}")
+                        # Get confidence indicator
+                        icon, level, color = get_confidence_indicator(confidence_score)
+                        
+                        # Create columns for value and confidence
+                        col_value, col_confidence = st.columns([3, 1])
+                        
+                        with col_value:
+                            st.markdown(f"**{label}**: {formatted_value}")
+                        
+                        with col_confidence:
+                            # Display confidence with color and tooltip
+                            confidence_percent = confidence_score * 100
+                            st.markdown(
+                                f"<span style='color: {color}; font-weight: bold;'>{icon} {confidence_percent:.0f}%</span>",
+                                unsafe_allow_html=True,
+                                help=f"Confidence Level: {level} ({confidence_percent:.1f}%)"
+                            )
+                
+                # Show manual fields that need attention
+                manual_fields = [k for k, v in ai_generated_data.items() if v == "manual_fill_required"]
+                if manual_fields:
+                    st.markdown("---")
+                    st.write("**⚠️ Fields Requiring Manual Input:**")
+                    for field_key in manual_fields:
+                        label = field_labels.get(field_key, field_key.replace('_', ' ').title())
+                        st.markdown(f"• {label}")
                 
                 # Add spacing
                 st.markdown("")
+
+        # Confidence Summary Section
+        st.subheader("📊 Confidence Summary")
+        
+        # Calculate confidence statistics
+        filled_fields = {k: v for k, v in field_confidence_scores.items() 
+                        if k in ai_generated_data and ai_generated_data[k] != "manual_fill_required"}
+        
+        if filled_fields:
+            confidence_values = list(filled_fields.values())
+            avg_confidence = sum(confidence_values) / len(confidence_values)
             
-            # Show manual fields that need attention
-            st.markdown("---")
-            st.write("**⚠️ Manual Review Required:**")
-            manual_fields = [k for k, v in display_json.get('ai_generated', {}).items() if v == "manual_fill_required"]
-            if manual_fields:
-                for field in manual_fields:
-                    field_label = field.replace('_', ' ').title()
-                    st.markdown(f"• **{field_label}**")
-            else:
-                st.success("✅ All fields automatically filled!")
+            # Count fields by confidence level
+            high_conf = sum(1 for conf in confidence_values if conf >= 0.8)
+            medium_conf = sum(1 for conf in confidence_values if 0.6 <= conf < 0.8)
+            low_conf = sum(1 for conf in confidence_values if 0.3 <= conf < 0.6)
+            very_low_conf = sum(1 for conf in confidence_values if conf < 0.3)
             
-            # Add final spacing
-            st.markdown("")
+            # Display summary metrics
+            conf_col1, conf_col2, conf_col3, conf_col4 = st.columns(4)
+            
+            with conf_col1:
+                st.metric("🟢 High Confidence", high_conf, help="80%+ confidence")
+            with conf_col2:
+                st.metric("🟡 Medium Confidence", medium_conf, help="60-79% confidence") 
+            with conf_col3:
+                st.metric("🟠 Low Confidence", low_conf, help="30-59% confidence")
+            with conf_col4:
+                st.metric("🔴 Very Low Confidence", very_low_conf, help="<30% confidence")
+            
+            # Overall confidence indicator
+            overall_icon, overall_level, overall_color = get_confidence_indicator(avg_confidence)
+            st.markdown(
+                f"**Overall Confidence**: <span style='color: {overall_color}; font-weight: bold;'>"
+                f"{overall_icon} {avg_confidence*100:.1f}% ({overall_level})</span>",
+                unsafe_allow_html=True
+            )
+            
+            # Confidence distribution chart
+            if len(confidence_values) > 1:
+                import pandas as pd
+                confidence_df = pd.DataFrame({
+                    'Field': list(filled_fields.keys()),
+                    'Confidence': [conf * 100 for conf in confidence_values]
+                })
+                st.bar_chart(confidence_df.set_index('Field')['Confidence'])
+        else:
+            st.info("No fields were automatically filled to analyze confidence.")
 
         st.subheader("💰 API Cost Analysis")
         

@@ -945,6 +945,92 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
     # Initialize the form submission structure with ALL fields from the mapping (except description)
     ai_generated = {field_key: "manual_fill_required" for field_key in form_mappings.keys() if field_key != 'description'}
     
+    # Initialize confidence scores for each field
+    field_confidence_scores = {field_key: 0.0 for field_key in form_mappings.keys() if field_key != 'description'}
+    
+    # Helper function to calculate confidence for enum field matches
+    def calculate_enum_confidence(target, matched_option, all_options):
+        """Calculate confidence score for enum field matches based on string similarity"""
+        if not target or not matched_option:
+            return 0.0
+        
+        target_lower = target.lower().strip()
+        option_text = matched_option.get('label', '').lower().strip()
+        
+        # Exact match gets highest confidence
+        if target_lower == option_text:
+            return 0.95
+        
+        # Substring matches get high confidence
+        if target_lower in option_text or option_text in target_lower:
+            overlap = min(len(target_lower), len(option_text))
+            total = max(len(target_lower), len(option_text))
+            return 0.7 + (overlap / total) * 0.2  # 0.7 to 0.9 range
+        
+        # Fuzzy matches get moderate confidence
+        target_words = set(target_lower.split())
+        option_words = set(option_text.split())
+        if target_words & option_words:  # If there's any word overlap
+            overlap = len(target_words & option_words)
+            total = len(target_words | option_words)
+            return 0.4 + (overlap / total) * 0.3  # 0.4 to 0.7 range
+        
+        return 0.3  # Low confidence for other matches
+    
+    # Helper function to calculate confidence for extracted data fields
+    def calculate_extraction_confidence(field_key, extracted_data):
+        """Calculate confidence for fields based on extraction quality"""
+        value = extracted_data.get(field_key)
+        if not value:
+            return 0.0
+        
+        # Special handling for mileage with dedicated confidence
+        if field_key == 'mileage':
+            return extracted_data.get('mileage_confidence', 0.5)
+        
+        # Year confidence based on reasonable range
+        if field_key == 'year':
+            try:
+                year_int = int(value)
+                current_year = 2024
+                if 1990 <= year_int <= current_year:
+                    return 0.8  # High confidence for reasonable years
+                elif 1980 <= year_int <= current_year + 1:
+                    return 0.6  # Medium confidence for slightly older/newer
+                else:
+                    return 0.3  # Low confidence for unrealistic years
+            except:
+                return 0.2
+        
+        # Price confidence based on realistic values
+        if field_key == 'price':
+            try:
+                price_int = int(value)
+                if 100000 <= price_int <= 50000000:  # 100K to 50M LKR range
+                    return 0.7  # Good confidence for realistic prices
+                elif 50000 <= price_int <= 100000000:  # Extended range
+                    return 0.5  # Medium confidence
+                else:
+                    return 0.3  # Low confidence for unrealistic prices
+            except:
+                return 0.2
+        
+        # Engine capacity confidence
+        if field_key == 'engine_capacity':
+            try:
+                capacity_int = int(value)
+                if 800 <= capacity_int <= 6000:  # Common engine sizes
+                    return 0.8
+                elif 500 <= capacity_int <= 8000:  # Extended range
+                    return 0.6
+                else:
+                    return 0.3
+            except:
+                return 0.2
+        
+        # Text fields get medium confidence if present
+        return 0.6
+    
     # Helper function for fuzzy string matching
     def fuzzy_match_string(target, options, threshold=0.6):
         """Find best matching option using fuzzy string similarity"""
@@ -1039,12 +1125,15 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_condition = fuzzy_match_string(condition, condition_values, threshold=0.5)
                     if matched_condition:
                         ai_generated[field_key] = matched_condition['key']
+                        field_confidence_scores[field_key] = calculate_enum_confidence(condition, matched_condition, condition_values)
                     else:
                         # Condition was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        field_confidence_scores[field_key] = 0.0
                 else:
                     # No condition extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    field_confidence_scores[field_key] = 0.0
             
             elif field_key == 'body':
                 body = extracted_data.get('body')
@@ -1053,12 +1142,15 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_body = fuzzy_match_string(body, body_values, threshold=0.5)
                     if matched_body:
                         ai_generated[field_key] = matched_body['key']
+                        field_confidence_scores[field_key] = calculate_enum_confidence(body, matched_body, body_values)
                     else:
                         # Body type was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        field_confidence_scores[field_key] = 0.0
                 else:
                     # No body type extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    field_confidence_scores[field_key] = 0.0
             
             elif field_key == 'fuel_type':
                 fuel_type = extracted_data.get('fuel_type')
@@ -1067,12 +1159,15 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_fuel = fuzzy_match_string(fuel_type, fuel_values, threshold=0.5)
                     if matched_fuel:
                         ai_generated[field_key] = matched_fuel['key']
+                        field_confidence_scores[field_key] = calculate_enum_confidence(fuel_type, matched_fuel, fuel_values)
                     else:
                         # Fuel type was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        field_confidence_scores[field_key] = 0.0
                 else:
                     # No fuel type extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    field_confidence_scores[field_key] = 0.0
             
             elif field_key == 'transmission':
                 transmission = extracted_data.get('transmission')
@@ -1081,12 +1176,15 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_transmission = fuzzy_match_string(transmission, transmission_values, threshold=0.5)
                     if matched_transmission:
                         ai_generated[field_key] = matched_transmission['key']
+                        field_confidence_scores[field_key] = calculate_enum_confidence(transmission, matched_transmission, transmission_values)
                     else:
                         # Transmission was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        field_confidence_scores[field_key] = 0.0
                 else:
                     # No transmission extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    field_confidence_scores[field_key] = 0.0
         
         elif field_type == 'tree':
             # Handle tree fields (brand and model)
@@ -1098,12 +1196,15 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_brand = fuzzy_match_string(brand, brand_values, threshold=0.5)
                     if matched_brand:
                         ai_generated[field_key] = matched_brand['key']
+                        field_confidence_scores[field_key] = calculate_enum_confidence(brand, matched_brand, brand_values)
                     else:
                         # Brand was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        field_confidence_scores[field_key] = 0.0
                 else:
                     # No brand extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    field_confidence_scores[field_key] = 0.0
             
             elif field_key == 'model':
                 # Use model from extracted data
@@ -1159,7 +1260,16 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     
                     if matched_model_key:
                         ai_generated[field_key] = matched_model_key
-                        print(f"✅ Using vector DB key for model: {matched_model_key}")
+                        # Calculate confidence based on match type
+                        if match_type == "exact":
+                            field_confidence_scores[field_key] = 0.95
+                        elif match_type == "partial":
+                            field_confidence_scores[field_key] = 0.8
+                        elif match_type == "word_overlap":
+                            field_confidence_scores[field_key] = 0.7
+                        else:
+                            field_confidence_scores[field_key] = 0.6
+                        print(f"✅ Using vector DB key for model: {matched_model_key} (confidence: {field_confidence_scores[field_key]:.2f})")
                     else:
                         print(f"❌ No exact match found in vector DB for: {brand} {model}")
                         # Try fuzzy matching with form values if available
@@ -1168,17 +1278,21 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                             matched_model = fuzzy_match_string(model, model_values, threshold=0.5)
                             if matched_model:
                                 ai_generated[field_key] = matched_model['key']
-                                print(f"✅ Using fuzzy match key for model: {matched_model['key']}")
+                                field_confidence_scores[field_key] = calculate_enum_confidence(model, matched_model, model_values)
+                                print(f"✅ Using fuzzy match key for model: {matched_model['key']} (confidence: {field_confidence_scores[field_key]:.2f})")
                             else:
                                 ai_generated[field_key] = "manual_fill_required"
+                                field_confidence_scores[field_key] = 0.0
                                 print(f"❌ No fuzzy match found, setting to manual_fill_required")
                         else:
                             # No predefined model values, set to manual_fill_required
                             ai_generated[field_key] = "manual_fill_required"
+                            field_confidence_scores[field_key] = 0.0
                             print(f"❌ No model values available, setting to manual_fill_required")
                 else:
                     # No model or brand extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    field_confidence_scores[field_key] = 0.0
         
         elif field_type == 'year':
             # Handle year fields
@@ -1192,8 +1306,13 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         
                         if min_year <= year_int <= max_year:
                             ai_generated[field_key] = year_int
+                            field_confidence_scores[field_key] = calculate_extraction_confidence(field_key, extracted_data)
+                        else:
+                            field_confidence_scores[field_key] = 0.0
                     except (ValueError, TypeError):
-                        pass
+                        field_confidence_scores[field_key] = 0.0
+                else:
+                    field_confidence_scores[field_key] = 0.0
         
         elif field_type == 'measurement':
             # Handle measurement fields
@@ -1210,8 +1329,13 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         
                         if min_mileage <= mileage_int <= max_mileage:
                             ai_generated[field_key] = mileage_int
+                            field_confidence_scores[field_key] = mileage_confidence
+                        else:
+                            field_confidence_scores[field_key] = 0.0
                     except (ValueError, TypeError):
-                        pass
+                        field_confidence_scores[field_key] = 0.0
+                else:
+                    field_confidence_scores[field_key] = 0.0
             
             elif field_key == 'engine_capacity':
                 engine_capacity = extracted_data.get('engine_capacity')
@@ -1223,8 +1347,13 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         
                         if min_capacity <= capacity_int <= max_capacity:
                             ai_generated[field_key] = capacity_int
+                            field_confidence_scores[field_key] = calculate_extraction_confidence(field_key, extracted_data)
+                        else:
+                            field_confidence_scores[field_key] = 0.0
                     except (ValueError, TypeError):
-                        pass
+                        field_confidence_scores[field_key] = 0.0
+                else:
+                    field_confidence_scores[field_key] = 0.0
         
         elif field_type == 'money':
             # Handle money fields
@@ -1234,8 +1363,9 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     try:
                         price_int = int(price)
                         ai_generated[field_key] = price_int
+                        field_confidence_scores[field_key] = calculate_extraction_confidence(field_key, extracted_data)
                     except (ValueError, TypeError):
-                        pass
+                        field_confidence_scores[field_key] = 0.0
                 else:
                     # Provide fallback price estimate based on car characteristics
                     brand = extracted_data.get('brand', '').lower()
@@ -1276,12 +1406,18 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                             pass
                     
                     ai_generated[field_key] = estimated_price
+                    # Estimated prices have lower confidence than extracted ones
+                    field_confidence_scores[field_key] = 0.4
         
         elif field_type == 'text':
             # Handle text fields (skip description)
             if field_key != 'description':  # Skip description generation
                 generated_text = generate_text_field_value(field_key, field_info, extracted_data)
-                ai_generated[field_key] = generated_text
+                if generated_text and generated_text != "manual_fill_required":
+                    ai_generated[field_key] = generated_text
+                    field_confidence_scores[field_key] = calculate_extraction_confidence(field_key, extracted_data)
+                else:
+                    field_confidence_scores[field_key] = 0.0
     
     # Check if model was extracted but not in form mappings
     manual_required = [k for k, v in ai_generated.items() if v == "manual_fill_required"]
@@ -1295,6 +1431,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
     return {
         'ai_generated': ai_generated,
         'manual_required': manual_required,
+        'field_confidence_scores': field_confidence_scores,
         # 'extracted_data': extracted_data,
         # 'match_info': match_info
     }
