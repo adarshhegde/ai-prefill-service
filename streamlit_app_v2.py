@@ -781,10 +781,10 @@ def create_form_schema(vector_dataset, vector_search_results=None):
 
 def update_cost_analysis(api_calls=1, input_tokens=0, output_tokens=0):
     """Update cost analysis with API usage data."""
-    # Gemini 1.5 Pro pricing (updated 2024)
-    # For prompts <= 128k tokens (which our prompts are)
-    INPUT_COST_PER_1K = 0.00125  # $1.25 per 1M input tokens
-    OUTPUT_COST_PER_1K = 0.005    # $5.00 per 1M output tokens
+    # Gemini 2.5 Flash pricing (updated 2024)
+    # Simplified single-tier pricing
+    INPUT_COST_PER_1K = 0.0003    # $0.30 per 1M input tokens
+    OUTPUT_COST_PER_1K = 0.0025   # $2.50 per 1M output tokens
     
     # Ensure cost_analysis exists in session state
     if 'cost_analysis' not in st.session_state:

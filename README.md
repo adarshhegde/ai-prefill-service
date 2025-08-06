@@ -195,7 +195,7 @@ Standard (Others): 2,500,000 LKR
 ## 🔧 Technical Details
 
 ### AI Models
-- **Vision**: Google Gemini 1.5 Pro
+- **Vision**: Google Gemini 2.5 Flash
 - **Vector Search**: FAISS IndexFlatIP
 - **Embeddings**: TF-IDF with normalized text
 - **Fuzzy Matching**: Custom algorithm with confidence scoring

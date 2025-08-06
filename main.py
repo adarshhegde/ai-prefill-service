@@ -27,15 +27,13 @@ class GeminiCostTracker:
     """Track and analyze Gemini API costs"""
     
     def __init__(self):
-        # Gemini 1.5 Pro pricing (as of 2024)
-        # Input tokens: $1.25 per 1M tokens (≤128k), $2.50 per 1M tokens (>128k)
-        # Output tokens: $5.00 per 1M tokens (≤128k), $10.00 per 1M tokens (>128k)
-        # Images: $0.0025 per image
-        self.input_token_cost_per_1m_128k = 1.25
-        self.input_token_cost_per_1m_above_128k = 2.50
-        self.output_token_cost_per_1m_128k = 5.00
-        self.output_token_cost_per_1m_above_128k = 10.00
-        self.image_cost_per_image = 0.0025
+        # Gemini 2.5 Flash pricing (as of 2024)
+        # Input tokens: $0.30 per 1M tokens (text/image/video), $1.00 per 1M tokens (audio)
+        # Output tokens: $2.50 per 1M tokens (including thinking tokens)
+        # Images: $0.0025 per image (estimated, not specified in pricing table)
+        self.input_token_cost_per_1m = 0.30  # Simplified - single tier pricing
+        self.output_token_cost_per_1m = 2.50  # Including thinking tokens
+        self.image_cost_per_image = 0.0025  # Estimated based on previous models
         
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -45,16 +43,9 @@ class GeminiCostTracker:
     
     def add_request(self, input_tokens, output_tokens, images=1, request_type="vision"):
         """Add a request to the cost tracker"""
-        # Determine pricing tier based on input token count
-        if input_tokens <= 128000:
-            input_cost_per_1m = self.input_token_cost_per_1m_128k
-            output_cost_per_1m = self.output_token_cost_per_1m_128k
-        else:
-            input_cost_per_1m = self.input_token_cost_per_1m_above_128k
-            output_cost_per_1m = self.output_token_cost_per_1m_above_128k
-        
-        input_cost = (input_tokens / 1_000_000) * input_cost_per_1m
-        output_cost = (output_tokens / 1_000_000) * output_cost_per_1m
+        # Gemini 2.5 Flash has simplified single-tier pricing
+        input_cost = (input_tokens / 1_000_000) * self.input_token_cost_per_1m
+        output_cost = (output_tokens / 1_000_000) * self.output_token_cost_per_1m
         image_cost = images * self.image_cost_per_image
         total_request_cost = input_cost + output_cost + image_cost
         
@@ -253,8 +244,8 @@ def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_res
     - Only include alternatives with confidence > 0.3
     """
     
-    # Make API request to Gemini Pro
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
+    # Make API request to Gemini 2.5 Flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
     payload = {
         "contents": [
@@ -274,7 +265,6 @@ def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_res
             "temperature": 0.0,
             "topK": 1,
             "topP": 0.95,
-            "maxOutputTokens": 2048,
             "candidateCount": 1
         }
     }
@@ -300,7 +290,22 @@ def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_res
             result = response.json()
             
             if 'candidates' in result and result['candidates']:
-                content = result['candidates'][0]['content']['parts'][0]['text']
+                candidate = result['candidates'][0]
+                finish_reason = candidate.get('finishReason', 'UNKNOWN')
+                
+                # Check for token limit issues
+                if finish_reason == 'MAX_TOKENS':
+                    print(f"❌ Response truncated due to token limit (finish reason: {finish_reason})")
+                    print(f"🔍 Try reducing prompt complexity - no token limit set")
+                    return {"error": f"Response truncated due to token limit", "finish_reason": finish_reason}
+                
+                try:
+                    content = candidate['content']['parts'][0]['text']
+                except (KeyError, IndexError, TypeError) as e:
+                    print(f"❌ Error accessing response content: {e}")
+                    print(f"🔍 Finish reason: {finish_reason}")
+                    print(f"🔍 Response structure: {json.dumps(result, indent=2)}")
+                    return {"error": f"Invalid response structure: {e}", "result": result}
                 
                 # Extract token usage from response
                 usage_info = result.get('usageMetadata', {})
@@ -314,32 +319,61 @@ def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_res
                 # Debug: Print actual token counts
                 print(f"🔍 Token Usage Debug: input={input_tokens:,}, output={output_tokens:,}")
                 
-                import re
-                json_match = re.search(r'```json\n(\{.*?\})\n```', content, re.DOTALL)
-                if not json_match:
-                    json_match = re.search(r'(\{.*?\})', content, re.DOTALL)
+                # Enhanced JSON extraction for Gemini 2.5 Flash
+                def extract_json_from_response(content):
+                    """Extract JSON from various response formats"""
+                    import re
+                    
+                    # Try multiple patterns in order of preference
+                    patterns = [
+                        # Standard code block with json
+                        r'```json\s*(\{.*?\})\s*```',
+                        # Code block without language specification
+                        r'```\s*(\{.*?\})\s*```',
+                        # Just JSON object
+                        r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})',
+                        # JSON with extra whitespace
+                        r'(\{\s*"[^"]+"\s*:[^}]+\})',
+                        # Fallback: any content between braces
+                        r'(\{.*\})',
+                    ]
+                    
+                    for pattern in patterns:
+                        json_match = re.search(pattern, content, re.DOTALL | re.MULTILINE)
+                        if json_match:
+                            try:
+                                # Clean up the extracted JSON
+                                json_str = json_match.group(1).strip()
+                                # Remove any trailing commas before closing braces
+                                json_str = re.sub(r',\s*}', '}', json_str)
+                                json_str = re.sub(r',\s*]', ']', json_str)
+                                
+                                # Try to parse
+                                parsed = json.loads(json_str)
+                                return parsed, json_str
+                            except json.JSONDecodeError:
+                                continue
+                    
+                    return None, None
 
-                if json_match:
-                    try:
-                        print("✅ Parsing JSON response from Gemini...")
-                        extracted_data = json.loads(json_match.group(1))
-                        print(f"🎯 Extracted: {extracted_data.get('brand', 'Unknown')} {extracted_data.get('model', 'Unknown')}")
-                        
-                        # Process multiple identifications and select the best one
-                        processed_data = process_multiple_identifications(extracted_data)
-                        
-                        # Add token usage to the response
-                        processed_data['_token_usage'] = {
-                            'input_tokens': input_tokens,
-                            'output_tokens': output_tokens,
-                            'total_tokens': input_tokens + output_tokens,
-                            'cost_usd': request_cost
-                        }
-                        
-                        return processed_data
-                    except json.JSONDecodeError:
-                         print("❌ Failed to parse JSON from Gemini response")
-                         return {"error": "Invalid JSON in response", "raw_response": content}
+                extracted_data, json_str = extract_json_from_response(content)
+                
+                if extracted_data:
+                    print("✅ Parsing JSON response from Gemini...")
+                    print(f"🎯 Extracted: {extracted_data.get('brand', 'Unknown')} {extracted_data.get('model', 'Unknown')}")
+                    
+                    # Process multiple identifications and select the best one
+                    processed_data = process_multiple_identifications(extracted_data)
+                    
+                    # Add token usage to the response
+                    processed_data['_token_usage'] = {
+                        'input_tokens': input_tokens,
+                        'output_tokens': output_tokens,
+                        'total_tokens': input_tokens + output_tokens,
+                        'cost_usd': request_cost
+                    }
+                    
+                    return processed_data
                 else:
                     print("❌ No JSON found in Gemini response")
                     return {"error": "No JSON found in response", "raw_response": content}
@@ -380,7 +414,7 @@ def get_preliminary_query(image_path):
     If you are not confident, respond with "unknown".
     """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     payload = {
         "contents": [{
             "parts": [
@@ -390,7 +424,6 @@ def get_preliminary_query(image_path):
         }],
         "generationConfig": {
             "temperature": 0.0,
-            "maxOutputTokens": 50,
         }
     }
 
@@ -792,54 +825,28 @@ def extract_additional_details_with_gemini(image_path, matched_car_info, vector_
     transmission_values = [v['label'] for v in form_mappings.get('transmission', {}).get('values', [])]
     
     prompt = f"""
-    Analyze this car {brand} {model}.
-    
-    Extract additional details and return ONLY a JSON object using the EXACT provided conditions.
-    For each field, provide both the value and a confidence score (0.0 to 1.0) indicating how certain you are about that value:
+    Extract car details. Return JSON only:
 
     {{
-        "condition": "condition (must be one of: {', '.join(condition_values)})",
-        "condition_confidence": "confidence score for condition (0.0 to 1.0)",
-        "body": "body type (must be one of: {', '.join(body_values)})",
-        "body_confidence": "confidence score for body type (0.0 to 1.0)",
-        "fuel_type": "fuel type (must be one of: {', '.join(fuel_values)})",
-        "fuel_type_confidence": "confidence score for fuel type (0.0 to 1.0)",
-        "transmission": "transmission type (must be one of: {', '.join(transmission_values)})",
-        "transmission_confidence": "confidence score for transmission (0.0 to 1.0)",
-        "mileage": "mileage in km (ONLY if dashboard/odometer is clearly visible with readable numbers, otherwise null)",
-        "mileage_confidence": "confidence for mileage reading (0.0 to 1.0, null if not visible)",
-        "color": "primary exterior color",
-        "color_confidence": "confidence score for color (0.0 to 1.0)",
-        "year": "estimated manufacturing year (YYYY format)",
-        "year_confidence": "confidence score for year estimation (0.0 to 1.0)",
-        "price": "estimated price in LKR (provide reasonable estimate based on brand, model, year, and condition)",
-        "price_confidence": "confidence score for price estimation (0.0 to 1.0)",
-        "engine_capacity": "engine capacity in cc (e.g., 1500, 2000, or null for electric)",
-        "engine_capacity_confidence": "confidence score for engine capacity (0.0 to 1.0)"
+        "condition": "{condition_values[0] if condition_values else 'Used'}",
+        "body": "{body_values[0] if body_values else 'Sedan'}",
+        "fuel_type": "{fuel_values[0] if fuel_values else 'Petrol'}",
+        "transmission": "{transmission_values[0] if transmission_values else 'Manual'}",
+        "color": "color name",
+        "year": 2020,
+        "price": 5000000,
+        "engine_capacity": 1500
     }}
 
-    CRITICAL: You MUST use EXACT values from the provided lists. Do not use synonyms or variations.
-    
-    Confidence Score Guidelines:
-    - 1.0: Completely certain, clearly visible or directly readable
-    - 0.8-0.9: Very confident, strong visual evidence
-    - 0.6-0.7: Moderately confident, some visual clues but not definitive
-    - 0.4-0.5: Low confidence, educated guess based on limited information
-    - 0.2-0.3: Very uncertain, speculation based on minimal clues
-    - 0.0-0.1: No confidence, complete guess
-    
-    Extraction Guidelines:
-    - Use EXACT values from the lists provided - no exceptions
-    - Only extract mileage if dashboard/odometer is clearly visible and readable
-    - Evaluate if car is a hybrid or electric or petrol or diesel or CNG or LPG or hydrogen or other fuel type
-    - For price estimation: Provide reasonable estimates based on brand, model, year, and condition
-    - Focus on clearly visible information
-    - For electric vehicles, set engine_capacity to null, and transmission to automatic
-    - Be honest about confidence levels - don't inflate scores
+    Use these exact values:
+    - condition: {', '.join(condition_values[:3])}
+    - body: {', '.join(body_values[:3])}
+    - fuel_type: {', '.join(fuel_values[:3])}
+    - transmission: {', '.join(transmission_values[:2])}
     """
     
-    # Make API request to Gemini Pro
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
+    # Make API request to Gemini 2.5 Flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
     payload = {
         "contents": [
@@ -859,7 +866,6 @@ def extract_additional_details_with_gemini(image_path, matched_car_info, vector_
             "temperature": 0.0,
             "topK": 1,
             "topP": 0.95,
-            "maxOutputTokens": 1024,
             "candidateCount": 1
         }
     }
@@ -885,7 +891,22 @@ def extract_additional_details_with_gemini(image_path, matched_car_info, vector_
             result = response.json()
             
             if 'candidates' in result and result['candidates']:
-                content = result['candidates'][0]['content']['parts'][0]['text']
+                candidate = result['candidates'][0]
+                finish_reason = candidate.get('finishReason', 'UNKNOWN')
+                
+                # Check for token limit issues
+                if finish_reason == 'MAX_TOKENS':
+                    print(f"❌ Response truncated due to token limit (finish reason: {finish_reason})")
+                    print(f"🔍 Try reducing prompt complexity - no token limit set")
+                    return {"error": f"Response truncated due to token limit", "finish_reason": finish_reason}
+                
+                try:
+                    content = candidate['content']['parts'][0]['text']
+                except (KeyError, IndexError, TypeError) as e:
+                    print(f"❌ Error accessing response content: {e}")
+                    print(f"🔍 Finish reason: {finish_reason}")
+                    print(f"🔍 Response structure: {json.dumps(result, indent=2)}")
+                    return {"error": f"Invalid response structure: {e}", "result": result}
                 
                 # Extract token usage from response
                 usage_info = result.get('usageMetadata', {})
@@ -899,30 +920,61 @@ def extract_additional_details_with_gemini(image_path, matched_car_info, vector_
                 # Debug: Print actual token counts
                 print(f"🔍 Additional Details Token Debug: input={input_tokens:,}, output={output_tokens:,}")
                 
-                import re
-                json_match = re.search(r'```json\n(\{.*?\})\n```', content, re.DOTALL)
-                if not json_match:
-                    json_match = re.search(r'(\{.*?\})', content, re.DOTALL)
+                # Enhanced JSON extraction for additional details
+                def extract_json_from_response(content):
+                    """Extract JSON from various response formats"""
+                    import re
+                    
+                    # Try multiple patterns in order of preference
+                    patterns = [
+                        # Standard code block with json
+                        r'```json\s*(\{.*?\})\s*```',
+                        # Code block without language specification
+                        r'```\s*(\{.*?\})\s*```',
+                        # Just JSON object
+                        r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})',
+                        # JSON with extra whitespace
+                        r'(\{\s*"[^"]+"\s*:[^}]+\})',
+                        # Fallback: any content between braces
+                        r'(\{.*\})',
+                    ]
+                    
+                    for pattern in patterns:
+                        json_match = re.search(pattern, content, re.DOTALL | re.MULTILINE)
+                        if json_match:
+                            try:
+                                # Clean up the extracted JSON
+                                json_str = json_match.group(1).strip()
+                                # Remove any trailing commas before closing braces
+                                json_str = re.sub(r',\s*}', '}', json_str)
+                                json_str = re.sub(r',\s*]', ']', json_str)
+                                
+                                # Try to parse
+                                parsed = json.loads(json_str)
+                                return parsed, json_str
+                            except json.JSONDecodeError:
+                                continue
+                    
+                    return None, None
 
-                if json_match:
-                    try:
-                        print("✅ Parsing additional details JSON response...")
-                        additional_data = json.loads(json_match.group(1))
-                        
-                        # Add token usage to the response
-                        additional_data['_token_usage'] = {
-                            'input_tokens': input_tokens,
-                            'output_tokens': output_tokens,
-                            'total_tokens': input_tokens + output_tokens,
-                            'cost_usd': request_cost
-                        }
-                        
-                        return additional_data
-                    except json.JSONDecodeError:
-                         print("❌ Failed to parse JSON from additional details response")
-                         return {"error": "Invalid JSON in response", "raw_response": content}
+                additional_data, json_str = extract_json_from_response(content)
+                
+                if additional_data:
+                    print("✅ Parsing additional details JSON response...")
+                    
+                    # Add token usage to the response
+                    additional_data['_token_usage'] = {
+                        'input_tokens': input_tokens,
+                        'output_tokens': output_tokens,
+                        'total_tokens': input_tokens + output_tokens,
+                        'cost_usd': request_cost
+                    }
+                    
+                    return additional_data
                 else:
                     print("❌ No JSON found in additional details response")
+                    print(f"🔍 Raw response content (first 500 chars): {content[:500]}")
+                    print(f"🔍 Full response content: {repr(content)}")
                     return {"error": "No JSON found in response", "raw_response": content}
             else:
                 print("❌ No response from Gemini API")
@@ -1056,7 +1108,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             # Handle enum fields using extracted data and ikman classification
             if field_key == 'condition':
                 condition = extracted_data.get('condition')
-                condition_confidence = extracted_data.get('condition_confidence', 0.0)
+                condition_confidence = extracted_data.get('condition_confidence', 0.7)  # Default confidence for simplified prompt
                 if condition:
                     condition_values = field_info.get('values', [])
                     matched_condition = fuzzy_match_string(condition, condition_values, threshold=0.5)
@@ -1074,7 +1126,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             
             elif field_key == 'body':
                 body = extracted_data.get('body')
-                body_confidence = extracted_data.get('body_confidence', 0.0)
+                body_confidence = extracted_data.get('body_confidence', 0.7)  # Default confidence
                 if body:
                     body_values = field_info.get('values', [])
                     matched_body = fuzzy_match_string(body, body_values, threshold=0.5)
@@ -1092,7 +1144,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             
             elif field_key == 'fuel_type':
                 fuel_type = extracted_data.get('fuel_type')
-                fuel_type_confidence = extracted_data.get('fuel_type_confidence', 0.0)
+                fuel_type_confidence = extracted_data.get('fuel_type_confidence', 0.7)  # Default confidence
                 if fuel_type:
                     fuel_values = field_info.get('values', [])
                     matched_fuel = fuzzy_match_string(fuel_type, fuel_values, threshold=0.5)
@@ -1110,7 +1162,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             
             elif field_key == 'transmission':
                 transmission = extracted_data.get('transmission')
-                transmission_confidence = extracted_data.get('transmission_confidence', 0.0)
+                transmission_confidence = extracted_data.get('transmission_confidence', 0.7)  # Default confidence
                 if transmission:
                     transmission_values = field_info.get('values', [])
                     matched_transmission = fuzzy_match_string(transmission, transmission_values, threshold=0.5)
@@ -1296,7 +1348,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             # Handle year fields
             if field_key == 'model_year':
                 year = extracted_data.get('year')
-                year_confidence = extracted_data.get('year_confidence', 0.0)
+                year_confidence = extracted_data.get('year_confidence', 0.6)  # Default confidence for year estimation
                 if year:
                     try:
                         year_int = int(year)
@@ -1338,7 +1390,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             
             elif field_key == 'engine_capacity':
                 engine_capacity = extracted_data.get('engine_capacity')
-                engine_capacity_confidence = extracted_data.get('engine_capacity_confidence', 0.0)
+                engine_capacity_confidence = extracted_data.get('engine_capacity_confidence', 0.6)  # Default confidence
                 if engine_capacity:
                     try:
                         capacity_int = int(engine_capacity)
@@ -1359,7 +1411,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             # Handle money fields
             if field_key == 'price':
                 price = extracted_data.get('price')
-                price_confidence = extracted_data.get('price_confidence', 0.0)
+                price_confidence = extracted_data.get('price_confidence', 0.5)  # Default confidence for price estimation
                 if price:
                     try:
                         price_int = int(price)
@@ -1418,7 +1470,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
     
     # Handle additional extracted fields not in form mappings (like color)
     color = extracted_data.get('color')
-    color_confidence = extracted_data.get('color_confidence', 0.0)
+    color_confidence = extracted_data.get('color_confidence', 0.8)  # Default confidence for color
     if color:
         ai_generated['color'] = color
         confidence_scores['color'] = color_confidence
@@ -1593,14 +1645,13 @@ def process_car_images_batch(image_paths, vector_dataset, batch_size=3, max_retr
                 }
             })
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": parts}],
             "generationConfig": {
                 "temperature": 0.0,
                 "topK": 1,
                 "topP": 0.95,
-                "maxOutputTokens": 2048,
                 "candidateCount": 1
             }
         }
