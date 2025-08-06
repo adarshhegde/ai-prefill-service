@@ -523,173 +523,216 @@ def render_processing_page():
 
 def render_results_page():
     """Render the results page."""
-    st.header("🎉 Analysis Complete!")
-    st.balloons()
-
+    st.title("🚗 Car Analysis Results")
+    
     result = st.session_state.processing_result
     if result:
-        st.subheader("📊 Auto-Fill Statistics")
+        # Quick summary metrics
         field_stats = result.get('field_statistics', {})
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("AI Prefilled Fields", len(field_stats.get('ai_prefilled', [])))
-        with col2:
-            st.metric("Fields Requiring Manual Review", len(field_stats.get('manual_required', [])))
-        with col3:
-            st.metric("Total Fields", field_stats.get('total_fields', 0))
-
-        st.subheader("📋 ikman.lk Form Submission Data")
-        display_json = {k: v for k, v in result['ikman_form_submission'].items() if not k.startswith('_')}
+        ai_prefilled = len(field_stats.get('ai_prefilled', []))
+        manual_required = len(field_stats.get('manual_required', []))
+        total_fields = field_stats.get('total_fields', 0)
+        success_rate = (ai_prefilled / total_fields * 100) if total_fields > 0 else 0
         
-        # Create two columns for JSON and readable format
+        # Top-level success indicator
+        if success_rate >= 80:
+            st.success(f"🎯 **Excellent Results** - {ai_prefilled} of {total_fields} fields auto-filled ({success_rate:.0f}%)")
+        elif success_rate >= 60:
+            st.info(f"📊 **Good Results** - {ai_prefilled} of {total_fields} fields auto-filled ({success_rate:.0f}%)")
+        else:
+            st.warning(f"⚠️ **Partial Results** - {ai_prefilled} of {total_fields} fields auto-filled ({success_rate:.0f}%)")
+
+        st.markdown("---")
+
+        # Main results
+        display_json = {k: v for k, v in result['ikman_form_submission'].items() if not k.startswith('_')}
+        ai_generated_data = display_json.get('ai_generated', {})
+        confidence_scores = display_json.get('confidence_scores', {})
+        
+        # Field labels
+        field_labels = {
+            'condition': '🚗 Condition',
+            'brand': '🏭 Brand', 
+            'model': '🚙 Model',
+            'model_year': '📅 Year',
+            'mileage': '🛣️ Mileage',
+            'engine_capacity': '⚙️ Engine Capacity',
+            'fuel_type': '⛽ Fuel Type',
+            'transmission': '🔧 Transmission',
+            'body': '🚐 Body Type',
+            'price': '💰 Price',
+            'edition': '🏷️ Edition',
+            'color': '🎨 Color'
+        }
+        
+        # Simple confidence indicator
+        def get_confidence_level(confidence):
+            if confidence >= 0.8:
+                return "High", "🟢"
+            elif confidence >= 0.6:
+                return "Good", "🟡"
+            elif confidence > 0:
+                return "Low", "🟠"
+            else:
+                return "Est.", "⚪"
+
+        # Display fields in a clean two-column layout
         col1, col2 = st.columns(2)
         
-        with col1:
-            st.write("**🔧 Raw JSON Data**")
-            st.json(display_json)
+        # Separate filled fields from manual fields and organize by priority
+        filled_fields = []
+        manual_fields = []
         
-        with col2:    
-            # Use the ai_generated data from the JSON for readable format
-            ai_generated_data = display_json.get('ai_generated', {})
-            # Field mapping for better labels
-            field_labels = {
-                'condition': '🚗 Condition',
-                'brand': '🏭 Brand',
-                'model': '🚙 Model',
-                'model_year': '📅 Year',
-                'mileage': '🛣️ Mileage (km)',
-                'engine_capacity': '⚙️ Engine Capacity (cc)',
-                'fuel_type': '⛽ Fuel Type',
-                'transmission': '🔧 Transmission',
-                'body': '🚐 Body Type',
-                'price': '💰 Price (LKR)',
-                'edition': '🏷️ Edition/Trim',
-                'color': '🎨 Color',
-                'confidence': '🎯 Confidence',
-                'visible_features': '🔍 Visible Features'
-            }
-            
-            # Create a container for consistent styling
-            with st.container():
-                # Display each field with consistent styling
-                for field_key, field_value in ai_generated_data.items():
-                    # Skip internal confidence fields that shouldn't be displayed
-                    if field_key in ['mileage_confidence']:
-                        continue
-                    if field_value and field_value != "manual_fill_required":
-                        label = field_labels.get(field_key, field_key.replace('_', ' ').title())
-                        
-                        # Format the value based on field type
-                        if field_key == 'price' and field_value:
-                            try:
-                                price_int = int(field_value)
-                                formatted_value = f"LKR {price_int:,}"
-                            except (ValueError, TypeError):
-                                formatted_value = f"LKR {field_value}"
-                        elif field_key == 'mileage' and field_value:
-                            try:
-                                mileage_int = int(field_value)
-                                formatted_value = f"{mileage_int:,} km"
-                            except (ValueError, TypeError):
-                                formatted_value = f"{field_value} km"
-                        elif field_key == 'engine_capacity' and field_value:
-                            formatted_value = f"{field_value} cc"
-                        elif field_key == 'model_year' and field_value:
-                            formatted_value = str(field_value)
-                        elif field_key == 'confidence' and field_value:
-                            # Format confidence as percentage
-                            try:
-                                confidence_float = float(field_value)
-                                formatted_value = f"{confidence_float:.2f}"
-                            except (ValueError, TypeError):
-                                formatted_value = str(field_value)
-                        elif field_key == 'visible_features' and field_value:
-                            # Handle list of features
-                            if isinstance(field_value, list):
-                                formatted_value = ", ".join(field_value)
-                            else:
-                                formatted_value = str(field_value)
-                        else:
-                            formatted_value = str(field_value) if field_value else "Not specified"
-                        
-                        # Consistent styling for all fields
-                        st.markdown(f"**{label}**: {formatted_value}")
+        # Define field priority order (brand and model first, then others)
+        field_priority = [
+            'brand', 'model', 'condition', 'model_year', 'body', 'fuel_type', 
+            'transmission', 'color', 'price', 'engine_capacity', 'mileage', 'edition'
+        ]
+        
+        # Organize fields by priority
+        for field_key in field_priority:
+            if field_key in ai_generated_data:
+                field_value = ai_generated_data[field_key]
+                if field_value and field_value != "manual_fill_required":
+                    filled_fields.append((field_key, field_value))
+                else:
+                    manual_fields.append((field_key, field_value))
+        
+        # Add any remaining fields not in priority list
+        for field_key, field_value in ai_generated_data.items():
+            if field_key not in field_priority and field_key not in ['mileage_confidence']:
+                if field_value and field_value != "manual_fill_required":
+                    filled_fields.append((field_key, field_value))
+                else:
+                    manual_fields.append((field_key, field_value))
+        
+        # Combine filled fields first, then manual fields
+        all_fields = filled_fields + manual_fields
+        mid_point = len(all_fields) // 2
+        
+        with col1:
+            st.subheader("📋 Vehicle Details")
+            for field_key, field_value in all_fields[:mid_point]:
+                label = field_labels.get(field_key, field_key.replace('_', ' ').title())
+                confidence = confidence_scores.get(field_key, 0.0)
+                conf_level, conf_emoji = get_confidence_level(confidence)
                 
-                # Add spacing
-                st.markdown("")
+                if field_value and field_value != "manual_fill_required":
+                    # Format the value
+                    if field_key == 'price':
+                        try:
+                            price_int = int(field_value)
+                            formatted_value = f"LKR {price_int:,}"
+                        except (ValueError, TypeError):
+                            formatted_value = f"LKR {field_value}"
+                    elif field_key == 'mileage':
+                        try:
+                            mileage_int = int(field_value)
+                            formatted_value = f"{mileage_int:,} km"
+                        except (ValueError, TypeError):
+                            formatted_value = f"{field_value} km"
+                    elif field_key == 'engine_capacity':
+                        formatted_value = f"{field_value} cc"
+                    else:
+                        formatted_value = str(field_value).title()
+                    
+                    if confidence > 0:
+                        st.write(f"{label}: **{formatted_value}** {conf_emoji} `{confidence:.2f}`")
+                    else:
+                        st.write(f"{label}: **{formatted_value}** {conf_emoji}")
+                else:
+                    # Manual input required with red chip styling
+                    st.markdown(f"{label}: :red[🔴 **Manual input required**]")
             
-            # Show manual fields that need attention
-            st.markdown("---")
-            st.write("**⚠️ Manual Review Required:**")
-            manual_fields = [k for k, v in display_json.get('ai_generated', {}).items() if v == "manual_fill_required"]
-            if manual_fields:
-                for field in manual_fields:
-                    field_label = field.replace('_', ' ').title()
-                    st.markdown(f"• **{field_label}**")
-            else:
-                st.success("✅ All fields automatically filled!")
-            
-            # Add final spacing
-            st.markdown("")
+        with col2:
+            st.subheader("📊 Additional Info")
+            for field_key, field_value in all_fields[mid_point:]:
+                label = field_labels.get(field_key, field_key.replace('_', ' ').title())
+                confidence = confidence_scores.get(field_key, 0.0)
+                conf_level, conf_emoji = get_confidence_level(confidence)
+                
+                if field_value and field_value != "manual_fill_required":
+                    # Format the value
+                    if field_key == 'price':
+                        try:
+                            price_int = int(field_value)
+                            formatted_value = f"LKR {price_int:,}"
+                        except (ValueError, TypeError):
+                            formatted_value = f"LKR {field_value}"
+                    elif field_key == 'mileage':
+                        try:
+                            mileage_int = int(field_value)
+                            formatted_value = f"{mileage_int:,} km"
+                        except (ValueError, TypeError):
+                            formatted_value = f"{field_value} km"
+                    elif field_key == 'engine_capacity':
+                        formatted_value = f"{field_value} cc"
+                    else:
+                        formatted_value = str(field_value).title()
+                    
+                    if confidence > 0:
+                        st.write(f"{label}: **{formatted_value}** {conf_emoji} `{confidence:.2f}`")
+                    else:
+                        st.write(f"{label}: **{formatted_value}** {conf_emoji}")
+                else:
+                    # Manual input required with red chip styling
+                    st.markdown(f"{label}: :red[🔴 **Manual input required**]")
 
-        st.subheader("💰 API Cost Analysis")
+        # Remove the separate manual review section since it's now integrated
+        # Manual review section is now integrated above
+
+        # Detailed API cost breakdown
+        st.markdown("---")
+        st.subheader("💰 API Cost Breakdown")
         
         cost_data = st.session_state.cost_analysis
         
+        # Main cost metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("API Calls", cost_data['api_calls'])
+            st.metric("API Calls", cost_data.get('api_calls', 0))
         with col2:
-            st.metric("Total Tokens", f"{cost_data['total_tokens']:,}")
+            st.metric("Input Tokens", f"{cost_data.get('input_tokens', 0):,}")
         with col3:
-            st.metric("Input Tokens", f"{cost_data['input_tokens']:,}")
+            st.metric("Output Tokens", f"{cost_data.get('output_tokens', 0):,}")
         with col4:
-            st.metric("Output Tokens", f"{cost_data['output_tokens']:,}")
-        
-        # Cost breakdown
-        st.write("**💵 Cost Breakdown:**")
-        input_cost = (cost_data['input_tokens'] / 1000) * 0.0035
-        output_cost = (cost_data['output_tokens'] / 1000) * 0.105
-        total_cost = input_cost + output_cost
-        
-        cost_col1, cost_col2, cost_col3 = st.columns(3)
-        with cost_col1:
-            st.metric("Input Cost", f"${input_cost:.4f}")
-        with cost_col2:
-            st.metric("Output Cost", f"${output_cost:.4f}")
-        with cost_col3:
-            st.metric("Total Cost", f"${total_cost:.4f}", delta=f"${total_cost:.4f}")
-        
-        # Pricing info
-        st.info("""
-        **📊 Pricing (Gemini 1.5 Pro - prompts ≤128k tokens):**
-        - Input tokens: $1.25 per 1M tokens
-        - Output tokens: $5.00 per 1M tokens
-        - Image processing: Included in input tokens
-        """)
+            estimated_cost = cost_data.get('estimated_cost_usd', 0)
+            st.metric("Total Cost", f"${estimated_cost:.4f}")
 
-    if st.button("🔄 Start New Analysis", use_container_width=True):
-        # Reset session state for a new analysis
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        # Reinitialize cost analysis
-        st.session_state.cost_analysis = {
-            'api_calls': 0,
-            'total_tokens': 0,
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'estimated_cost_usd': 0.0
-        }
-        st.rerun()
-    
-    # Debug: Show current session state
-    if st.checkbox("🔍 Debug: Show Session State"):
-        st.write("**Current Session State:**")
-        for key, value in st.session_state.items():
-            if key == 'cost_analysis':
-                st.write(f"  {key}: {value}")
-            else:
-                st.write(f"  {key}: {type(value).__name__}")
+        # Summary stats
+        st.markdown("---")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("✅ Auto-filled", f"{ai_prefilled}/{total_fields}")
+        with col2:
+            st.metric("⚠️ Manual review", manual_required)
+        with col3:
+            if total_fields > 0:
+                efficiency = f"{(ai_prefilled/total_fields)*100:.0f}%"
+                st.metric("🎯 Efficiency", efficiency)
+
+        # Actions
+        st.markdown("---")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        
+        with col1:
+            if st.button("🔄 Analyze Another", type="primary", use_container_width=True):
+                st.session_state.page = 'upload'
+                st.rerun()
+        
+        with col2:
+            if st.button("📋 Copy JSON", use_container_width=True):
+                st.code(json.dumps(display_json, indent=2), language='json')
+        
+        with col3:
+            if st.button("🚀 Submit", use_container_width=True):
+                st.success("Ready for ikman.lk submission!")
+
+    else:
+        st.error("❌ No results found. Please process an image first.")
+        if st.button("⬅️ Back to Upload"):
+            st.session_state.page = 'upload'
+            st.rerun()
 
 def save_uploaded_file(uploaded_file):
     """Save uploaded file to a temporary location."""

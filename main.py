@@ -644,8 +644,8 @@ def match_gemini_extraction_to_form(extracted_data, vector_dataset, use_vector_s
         
         for entry in vector_dataset['vector_entries']:
             if entry['type'] == 'brand_model':
-                if (brand_name in entry.get('brand_label', '').lower() and 
-                    model_name in entry.get('model_label', '').lower()):
+                if (brand_name in (entry.get('brand_label') or '').lower() and
+                    model_name in (entry.get('model_label') or '').lower()):
                     form_data = entry.get('form_autofill_data', {})
                     match_info['confidence'] = 0.9
                     break
@@ -794,29 +794,48 @@ def extract_additional_details_with_gemini(image_path, matched_car_info, vector_
     prompt = f"""
     Analyze this car {brand} {model}.
     
-    Extract additional details and return ONLY a JSON object using the EXACT provided conditions:
+    Extract additional details and return ONLY a JSON object using the EXACT provided conditions.
+    For each field, provide both the value and a confidence score (0.0 to 1.0) indicating how certain you are about that value:
 
     {{
         "condition": "condition (must be one of: {', '.join(condition_values)})",
+        "condition_confidence": "confidence score for condition (0.0 to 1.0)",
         "body": "body type (must be one of: {', '.join(body_values)})",
+        "body_confidence": "confidence score for body type (0.0 to 1.0)",
         "fuel_type": "fuel type (must be one of: {', '.join(fuel_values)})",
+        "fuel_type_confidence": "confidence score for fuel type (0.0 to 1.0)",
         "transmission": "transmission type (must be one of: {', '.join(transmission_values)})",
+        "transmission_confidence": "confidence score for transmission (0.0 to 1.0)",
         "mileage": "mileage in km (ONLY if dashboard/odometer is clearly visible with readable numbers, otherwise null)",
         "mileage_confidence": "confidence for mileage reading (0.0 to 1.0, null if not visible)",
         "color": "primary exterior color",
+        "color_confidence": "confidence score for color (0.0 to 1.0)",
         "year": "estimated manufacturing year (YYYY format)",
+        "year_confidence": "confidence score for year estimation (0.0 to 1.0)",
         "price": "estimated price in LKR (provide reasonable estimate based on brand, model, year, and condition)",
-        "engine_capacity": "engine capacity in cc (e.g., 1500, 2000, or null for electric)"
+        "price_confidence": "confidence score for price estimation (0.0 to 1.0)",
+        "engine_capacity": "engine capacity in cc (e.g., 1500, 2000, or null for electric)",
+        "engine_capacity_confidence": "confidence score for engine capacity (0.0 to 1.0)"
     }}
 
     CRITICAL: You MUST use EXACT values from the provided lists. Do not use synonyms or variations.
-    Guidelines:
+    
+    Confidence Score Guidelines:
+    - 1.0: Completely certain, clearly visible or directly readable
+    - 0.8-0.9: Very confident, strong visual evidence
+    - 0.6-0.7: Moderately confident, some visual clues but not definitive
+    - 0.4-0.5: Low confidence, educated guess based on limited information
+    - 0.2-0.3: Very uncertain, speculation based on minimal clues
+    - 0.0-0.1: No confidence, complete guess
+    
+    Extraction Guidelines:
     - Use EXACT values from the lists provided - no exceptions
     - Only extract mileage if dashboard/odometer is clearly visible and readable
-    - Evlauate if car is a hybrid or electric or petrol or diesel or CNG or LPG or hydrogen or other fuel type
+    - Evaluate if car is a hybrid or electric or petrol or diesel or CNG or LPG or hydrogen or other fuel type
     - For price estimation: Provide reasonable estimates based on brand, model, year, and condition
     - Focus on clearly visible information
     - For electric vehicles, set engine_capacity to null, and transmission to automatic
+    - Be honest about confidence levels - don't inflate scores
     """
     
     # Make API request to Gemini Pro
@@ -945,6 +964,9 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
     # Initialize the form submission structure with ALL fields from the mapping (except description)
     ai_generated = {field_key: "manual_fill_required" for field_key in form_mappings.keys() if field_key != 'description'}
     
+    # Initialize confidence scores tracking
+    confidence_scores = {}
+    
     # Helper function for fuzzy string matching
     def fuzzy_match_string(target, options, threshold=0.6):
         """Find best matching option using fuzzy string similarity"""
@@ -1034,59 +1056,75 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
             # Handle enum fields using extracted data and ikman classification
             if field_key == 'condition':
                 condition = extracted_data.get('condition')
+                condition_confidence = extracted_data.get('condition_confidence', 0.0)
                 if condition:
                     condition_values = field_info.get('values', [])
                     matched_condition = fuzzy_match_string(condition, condition_values, threshold=0.5)
                     if matched_condition:
                         ai_generated[field_key] = matched_condition['key']
+                        confidence_scores[field_key] = condition_confidence
                     else:
                         # Condition was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        confidence_scores[field_key] = 0.0
                 else:
                     # No condition extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    confidence_scores[field_key] = 0.0
             
             elif field_key == 'body':
                 body = extracted_data.get('body')
+                body_confidence = extracted_data.get('body_confidence', 0.0)
                 if body:
                     body_values = field_info.get('values', [])
                     matched_body = fuzzy_match_string(body, body_values, threshold=0.5)
                     if matched_body:
                         ai_generated[field_key] = matched_body['key']
+                        confidence_scores[field_key] = body_confidence
                     else:
                         # Body type was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        confidence_scores[field_key] = 0.0
                 else:
                     # No body type extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    confidence_scores[field_key] = 0.0
             
             elif field_key == 'fuel_type':
                 fuel_type = extracted_data.get('fuel_type')
+                fuel_type_confidence = extracted_data.get('fuel_type_confidence', 0.0)
                 if fuel_type:
                     fuel_values = field_info.get('values', [])
                     matched_fuel = fuzzy_match_string(fuel_type, fuel_values, threshold=0.5)
                     if matched_fuel:
                         ai_generated[field_key] = matched_fuel['key']
+                        confidence_scores[field_key] = fuel_type_confidence
                     else:
                         # Fuel type was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        confidence_scores[field_key] = 0.0
                 else:
                     # No fuel type extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    confidence_scores[field_key] = 0.0
             
             elif field_key == 'transmission':
                 transmission = extracted_data.get('transmission')
+                transmission_confidence = extracted_data.get('transmission_confidence', 0.0)
                 if transmission:
                     transmission_values = field_info.get('values', [])
                     matched_transmission = fuzzy_match_string(transmission, transmission_values, threshold=0.5)
                     if matched_transmission:
                         ai_generated[field_key] = matched_transmission['key']
+                        confidence_scores[field_key] = transmission_confidence
                     else:
                         # Transmission was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        confidence_scores[field_key] = 0.0
                 else:
                     # No transmission extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    confidence_scores[field_key] = 0.0
         
         elif field_type == 'tree':
             # Handle tree fields (brand and model)
@@ -1098,12 +1136,15 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                     matched_brand = fuzzy_match_string(brand, brand_values, threshold=0.5)
                     if matched_brand:
                         ai_generated[field_key] = matched_brand['key']
+                        confidence_scores[field_key] = 0.8  # High confidence for successful brand match
                     else:
                         # Brand was extracted but couldn't be matched to form values
                         ai_generated[field_key] = "manual_fill_required"
+                        confidence_scores[field_key] = 0.0
                 else:
                     # No brand extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    confidence_scores[field_key] = 0.0
             
             elif field_key == 'model':
                 # Use model from extracted data
@@ -1112,78 +1153,150 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                 print(f"🔍 Processing model field: {model} for brand: {brand}")
                 
                 if model and brand:
-                    # Search vector dataset for brand-model combination
-                    search_query = f"{brand.lower()}-{model.lower()}"
-                    print(f"🔍 Searching vector dataset for: {search_query}")
+                    # Normalize the extracted brand and model to handle special characters
+                    normalized_brand = normalize_text_for_search(brand)
+                    normalized_model = normalize_text_for_search(model)
                     
-                    # Setup FAISS and search
+                    # Handle common model name variations
+                    model_variations = [model, normalized_model]
+                    
+                    # Add specific model variations for common cases
+                    if model.upper() == 'C-HR' or model.upper() == 'C HR':
+                        model_variations.extend(['CHR', 'chr', 'C-HR', 'C HR'])
+                    elif model.upper() == 'CHR':
+                        model_variations.extend(['C-HR', 'C HR', 'c-hr', 'c hr'])
+                    elif '-' in model:
+                        # For any hyphenated model, try without hyphen
+                        no_hyphen = model.replace('-', '').replace(' ', '')
+                        model_variations.append(no_hyphen)
+                        model_variations.append(no_hyphen.lower())
+                    
+                    # Remove duplicates while preserving order
+                    unique_model_variations = []
+                    seen = set()
+                    for var in model_variations:
+                        if var not in seen:
+                            seen.add(var)
+                            unique_model_variations.append(var)
+                    
+                    # Try multiple search query variations for better matching
+                    search_queries = []
+                    
+                    # Add queries for each model variation
+                    for model_var in unique_model_variations:
+                        search_queries.extend([
+                            f"{brand} {model_var}",  # Original brand with model variation
+                            f"{brand.lower()} {model_var.lower()}",  # Lowercase version
+                            f"{normalized_brand} {model_var}",  # Normalized brand with model variation
+                        ])
+                    
+                    # Add some additional formats
+                    search_queries.extend([
+                        f"{brand} {model}".upper(),  # Uppercase
+                        f"{brand}-{model}",  # Mixed case hyphen
+                    ])
+                    
+                    # Add model-only fallbacks
+                    for model_var in unique_model_variations:
+                        search_queries.append(model_var)
+                    
+                    # Remove duplicates while preserving order
+                    seen = set()
+                    unique_queries = []
+                    for query in search_queries:
+                        if query and query not in seen:
+                            seen.add(query)
+                            unique_queries.append(query)
+                    
+                    # Setup FAISS once
                     faiss_data = setup_faiss_vector_search(vector_dataset)
-                    search_results = search_vector_database(search_query, faiss_data, top_k=5)
-                    
-                    # Look for brand-model match with fuzzy matching
                     matched_model_key = None
-                    print(f"🔍 Checking {len(search_results)} search results...")
+                    match_type = None
                     
-                    for i, result in enumerate(search_results):
-                        metadata = result['metadata']
-                        result_brand = metadata.get('brand_label', '').lower()
-                        result_model = metadata.get('model_label', '').lower()
-                        search_brand = brand.lower()
-                        search_model = model.lower()
+                    # Try each search query variation
+                    for query_idx, search_query in enumerate(unique_queries):
+                        search_results = search_vector_database(search_query, faiss_data, top_k=5)
                         
-                        print(f"   {i+1}. {result_brand} {result_model} (type: {metadata.get('type')})")
+                        if not search_results:
+                            continue
                         
-                        # Check if brand matches exactly
-                        if (metadata.get('type') == 'brand_model' and 
-                            result_brand == search_brand):
+                        for i, result in enumerate(search_results):
+                            metadata = result['metadata']
+                            result_brand = (metadata.get('brand_label') or '').lower()
+                            result_model = (metadata.get('model_label') or '').lower()
+                            search_brand = normalized_brand.lower()
                             
-                            # Check for model match (exact or partial)
-                            model_match = False
-                            if result_model == search_model:
-                                # Exact match
-                                model_match = True
-                                match_type = "exact"
-                            elif search_model in result_model or result_model in search_model:
-                                # Partial match (e.g., "C3" in "e-c3" or "e-c3" in "C3")
-                                model_match = True
-                                match_type = "partial"
-                            elif any(word in result_model for word in search_model.split()) or any(word in search_model for word in result_model.split()):
-                                # Word overlap (e.g., "Pajero Sport" vs "Pajero")
-                                model_match = True
-                                match_type = "word_overlap"
-                            
-                            if model_match:
-                                matched_model_key = metadata.get('model_key')
-                                print(f"✅ Found {match_type} match: {metadata.get('brand_label')} {metadata.get('model_label')} -> key: {matched_model_key}")
-                                break
+                            # Check if brand matches exactly and it's a brand_model entry
+                            if (metadata.get('type') == 'brand_model' and 
+                                result_brand == search_brand):
+                                
+                                # Check for model match (exact or partial)
+                                model_match = False
+                                
+                                # Try matching against all our model variations
+                                for model_var in unique_model_variations:
+                                    model_var_lower = model_var.lower()
+                                    if result_model == model_var_lower:
+                                        # Exact match
+                                        model_match = True
+                                        match_type = "exact"
+                                        break
+                                    elif model_var_lower in result_model or result_model in model_var_lower:
+                                        # Partial match
+                                        model_match = True
+                                        match_type = "partial"
+                                        break
+                                
+                                # Fallback to word overlap if no variation matched
+                                if not model_match:
+                                    search_model = normalized_model.lower()
+                                    if any(word in result_model for word in search_model.split()) or any(word in search_model for word in result_model.split()):
+                                        model_match = True
+                                        match_type = "word_overlap"
+                                
+                                if model_match:
+                                    matched_model_key = metadata.get('model_key')
+                                    print(f"✅ Found {match_type} match: {metadata.get('brand_label')} {metadata.get('model_label')} -> key: {matched_model_key}")
+                                    break
+                        
+                        # If we found a match, break out of the query loop
+                        if matched_model_key:
+                            break
                     
                     if matched_model_key:
                         ai_generated[field_key] = matched_model_key
+                        confidence_scores[field_key] = 0.9 if match_type == "exact" else 0.7  # Higher confidence for exact matches
                         print(f"✅ Using vector DB key for model: {matched_model_key}")
                     else:
-                        print(f"❌ No exact match found in vector DB for: {brand} {model}")
+                        print(f"❌ No match found in vector DB for: {brand} {model}")
                         # Try fuzzy matching with form values if available
                         model_values = field_info.get('values', [])
                         if model_values:
                             matched_model = fuzzy_match_string(model, model_values, threshold=0.5)
                             if matched_model:
                                 ai_generated[field_key] = matched_model['key']
+                                confidence_scores[field_key] = 0.6  # Lower confidence for fuzzy match
                                 print(f"✅ Using fuzzy match key for model: {matched_model['key']}")
                             else:
                                 ai_generated[field_key] = "manual_fill_required"
-                                print(f"❌ No fuzzy match found, setting to manual_fill_required")
+                                confidence_scores[field_key] = 0.0
+                                print(f"❌ No match found, setting to manual_fill_required")
                         else:
                             # No predefined model values, set to manual_fill_required
                             ai_generated[field_key] = "manual_fill_required"
+                            confidence_scores[field_key] = 0.0
                             print(f"❌ No model values available, setting to manual_fill_required")
                 else:
                     # No model or brand extracted
                     ai_generated[field_key] = "manual_fill_required"
+                    confidence_scores[field_key] = 0.0
+                    print(f"❌ Missing model or brand: model='{model}', brand='{brand}'")
         
         elif field_type == 'year':
             # Handle year fields
             if field_key == 'model_year':
                 year = extracted_data.get('year')
+                year_confidence = extracted_data.get('year_confidence', 0.0)
                 if year:
                     try:
                         year_int = int(year)
@@ -1192,8 +1305,13 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         
                         if min_year <= year_int <= max_year:
                             ai_generated[field_key] = year_int
+                            confidence_scores[field_key] = year_confidence
+                        else:
+                            confidence_scores[field_key] = 0.0
                     except (ValueError, TypeError):
-                        pass
+                        confidence_scores[field_key] = 0.0
+                else:
+                    confidence_scores[field_key] = 0.0
         
         elif field_type == 'measurement':
             # Handle measurement fields
@@ -1210,11 +1328,17 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         
                         if min_mileage <= mileage_int <= max_mileage:
                             ai_generated[field_key] = mileage_int
+                            confidence_scores[field_key] = mileage_confidence
+                        else:
+                            confidence_scores[field_key] = 0.0
                     except (ValueError, TypeError):
-                        pass
+                        confidence_scores[field_key] = 0.0
+                else:
+                    confidence_scores[field_key] = mileage_confidence if mileage_confidence else 0.0
             
             elif field_key == 'engine_capacity':
                 engine_capacity = extracted_data.get('engine_capacity')
+                engine_capacity_confidence = extracted_data.get('engine_capacity_confidence', 0.0)
                 if engine_capacity:
                     try:
                         capacity_int = int(engine_capacity)
@@ -1223,19 +1347,26 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         
                         if min_capacity <= capacity_int <= max_capacity:
                             ai_generated[field_key] = capacity_int
+                            confidence_scores[field_key] = engine_capacity_confidence
+                        else:
+                            confidence_scores[field_key] = 0.0
                     except (ValueError, TypeError):
-                        pass
+                        confidence_scores[field_key] = 0.0
+                else:
+                    confidence_scores[field_key] = 0.0
         
         elif field_type == 'money':
             # Handle money fields
             if field_key == 'price':
                 price = extracted_data.get('price')
+                price_confidence = extracted_data.get('price_confidence', 0.0)
                 if price:
                     try:
                         price_int = int(price)
                         ai_generated[field_key] = price_int
+                        confidence_scores[field_key] = price_confidence
                     except (ValueError, TypeError):
-                        pass
+                        confidence_scores[field_key] = 0.0
                 else:
                     # Provide fallback price estimate based on car characteristics
                     brand = extracted_data.get('brand', '').lower()
@@ -1276,12 +1407,21 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                             pass
                     
                     ai_generated[field_key] = estimated_price
+                    confidence_scores[field_key] = 0.4  # Lower confidence for estimated price
         
         elif field_type == 'text':
             # Handle text fields (skip description)
             if field_key != 'description':  # Skip description generation
                 generated_text = generate_text_field_value(field_key, field_info, extracted_data)
                 ai_generated[field_key] = generated_text
+                confidence_scores[field_key] = 0.5  # Medium confidence for generated text
+    
+    # Handle additional extracted fields not in form mappings (like color)
+    color = extracted_data.get('color')
+    color_confidence = extracted_data.get('color_confidence', 0.0)
+    if color:
+        ai_generated['color'] = color
+        confidence_scores['color'] = color_confidence
     
     # Check if model was extracted but not in form mappings
     manual_required = [k for k, v in ai_generated.items() if v == "manual_fill_required"]
@@ -1294,6 +1434,7 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
     # Return the form submission JSON
     return {
         'ai_generated': ai_generated,
+        'confidence_scores': confidence_scores,
         'manual_required': manual_required,
         # 'extracted_data': extracted_data,
         # 'match_info': match_info
@@ -1340,7 +1481,7 @@ def enhance_match_info_with_form_data(extracted_data, vector_dataset, match_info
     if 'matched_brand_data' not in enhanced_match_info and 'brand' in form_mappings:
         brand_values = form_mappings['brand'].get('values', [])
         for brand_option in brand_values:
-            if brand_name in brand_option.get('label', '').lower():
+            if brand_name in (brand_option.get('label') or '').lower():
                 enhanced_match_info['matched_brand_data'] = brand_option
                 break
     
