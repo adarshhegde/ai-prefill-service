@@ -851,8 +851,8 @@ def match_gemini_extraction_to_form(extracted_data, vector_dataset, use_vector_s
         match_info = {'method': 'direct_matching', 'confidence': 0.5}
         
         # Try to match brand directly
-        brand_name = extracted_data.get('brand', '').lower()
-        model_name = extracted_data.get('model', '').lower()
+        brand_name = str(extracted_data.get('brand', '')).lower()
+        model_name = str(extracted_data.get('model', '')).lower()
         
         for entry in vector_dataset['vector_entries']:
             if entry['type'] == 'brand_model':
@@ -1622,8 +1622,8 @@ def generate_ikman_form_submission_json(extracted_data, vector_dataset, match_in
                         confidence_scores[field_key] = 0.0
                 else:
                     # Provide fallback price estimate based on car characteristics
-                    brand = extracted_data.get('brand', '').lower()
-                    condition = extracted_data.get('condition', '').lower()
+                    brand = str(extracted_data.get('brand', '')).lower()
+                    condition = str(extracted_data.get('condition', '')).lower()
                     year = extracted_data.get('year')
                     
                     # Estimate price based on brand and condition
@@ -1733,8 +1733,9 @@ def enhance_match_info_with_form_data(extracted_data, vector_dataset, match_info
     # Fallback: Search for brand in form values if not found via vector search
     if 'matched_brand_data' not in enhanced_match_info and 'brand' in form_mappings:
         brand_values = form_mappings['brand'].get('values', [])
+        brand_name = str(extracted_data.get('brand', '')).lower()
         for brand_option in brand_values:
-            if brand_name in (brand_option.get('label') or '').lower():
+            if brand_name in str(brand_option.get('label') or '').lower():
                 enhanced_match_info['matched_brand_data'] = brand_option
                 break
     
