@@ -637,63 +637,7 @@ def extract_car_info_with_gemini(image_path, form_schema=None, vector_search_res
 
 
 
-def get_preliminary_query(image_path):
-    """Use a lightweight prompt to get a brand/model query from an image."""
-    api_key = setup_gemini_client()
-    image_base64 = encode_image_to_base64(image_path)
-
-    prompt = """
-    Analyze this car image and identify the brand and model.
-    Respond with only the brand and model, separated by a space.
-    For example: "Toyota Corolla" or "BMW 3 Series".
-    If you are not confident, respond with "unknown".
-    """
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.0,
-        }
-    }
-
-    try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
-        result = response.json()
-        if 'candidates' in result and result['candidates']:
-            content = result['candidates'][0]['content']['parts'][0]['text'].strip()
-            
-            # Extract token usage
-            usage_info = result.get('usageMetadata', {})
-            input_tokens = usage_info.get('promptTokenCount', 0)
-            output_tokens = usage_info.get('candidatesTokenCount', 0)
-            
-            # Track API costs
-            request_cost = cost_tracker.add_request(input_tokens, output_tokens, images=1, request_type="preliminary_query")
-            print(f"💰 Preliminary query cost: ${request_cost:.4f}")
-            
-            # Debug: Print actual token counts
-            print(f"🔍 Preliminary Query Token Debug: input={input_tokens:,}, output={output_tokens:,}")
-            
-            if content.lower() != "unknown":
-                return {
-                    'query': content,
-                    'token_usage': {
-                        'input_tokens': input_tokens,
-                        'output_tokens': output_tokens,
-                        'total_tokens': input_tokens + output_tokens,
-                        'cost_usd': request_cost
-                    }
-                }
-    except Exception:
-        return None
-    return None
+# Removed get_preliminary_query function - directly using brand extraction instead
 
 
 def normalize_text_for_search(text):

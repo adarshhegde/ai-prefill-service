@@ -17,7 +17,6 @@ from main import (
     generate_ikman_form_submission_json,
     generate_vehicle_description_with_gemini,
     load_env_vars,
-    get_preliminary_query,
     cost_tracker,
 )
 
@@ -212,7 +211,7 @@ def render_extract_url_page():
             st.rerun()
 
 def render_processing_page():
-    """Render the processing page with two-step extraction."""
+    """Render the processing page with streamlined direct extraction."""
     st.header("🔄 AI Analysis in Progress")
     
     # Reset the global cost tracker for this session
@@ -264,40 +263,8 @@ def render_processing_page():
                     st.code("pip install -r requirements.txt")
                     st.stop()
 
-    first_file_path = st.session_state.uploaded_files[0]
-    if not isinstance(first_file_path, str):
-        first_file_path = save_uploaded_file(first_file_path)
-
-    with st.spinner("Step 1 of 3: Getting preliminary query from image..."):
-        preliminary_result = get_preliminary_query(first_file_path)
-        if preliminary_result and isinstance(preliminary_result, dict):
-            preliminary_query = preliminary_result['query']
-            token_usage = preliminary_result['token_usage']
-            # Track actual token usage (will be added to total later)
-            st.session_state.preliminary_tokens = token_usage
-            st.write(f"🔍 Preliminary query: **{preliminary_query}**")
-        elif preliminary_result:
-            # Fallback for old format
-            preliminary_query = preliminary_result
-            st.session_state.preliminary_tokens = {'input_tokens': 500, 'output_tokens': 50}  # Estimate
-            st.write(f"🔍 Preliminary query: **{preliminary_query}**")
-        else:
-            st.write("⚠️ Could not determine a preliminary query from the image.")
-            preliminary_query = None
-            st.session_state.preliminary_tokens = {'input_tokens': 0, 'output_tokens': 0}
-
-    with st.spinner("Step 2 of 3: Performing vector search..."):
-        if preliminary_query:
-            vector_search_results = search_vector_database(preliminary_query, st.session_state.faiss_data, top_k=5)
-            if vector_search_results:
-                st.write(f"✅ Found {len(vector_search_results)} potential matches.")
-            else:
-                st.write("⚠️ No matches found in the vector database.")
-        else:
-            vector_search_results = None
-
-    # Step 3: Extract car information from images in parallel
-    st.write("🔍 **Step 3 of 3: Extracting car information from images (parallel processing)...**")
+    # Step 1: Extract car information from images in parallel (no preliminary query needed)
+    st.write("🔍 **Step 1 of 2: Extracting car information from images (parallel processing)...**")
     
     total_files = len(st.session_state.uploaded_files)
     st.info(f"🚀 **Processing {total_files} image(s) in parallel** - This will be much faster!")
@@ -442,7 +409,7 @@ def render_processing_page():
     with st.spinner("Merging extracted data..."):
         merged_data = merge_extracted_data(extraction_results)
 
-    with st.spinner("Generating form submission data..."):
+    with st.spinner("Step 2 of 2: Generating form submission data..."):
         # Since the new prompt is more accurate, we can simplify the confidence logic
         # and directly use the extracted data.
         # The vector search is now part of the extraction, so we don't need a separate match_info
@@ -702,19 +669,101 @@ def render_results_page():
         st.markdown("---")
         st.subheader("💰 API Cost Breakdown")
         
+        # Get detailed cost data from cost_tracker
+        cost_summary = cost_tracker.get_cost_summary()
         cost_data = st.session_state.cost_analysis
         
         # Main cost metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("API Calls", cost_data.get('api_calls', 0))
+            st.metric("API Calls", cost_summary.get('total_requests', 0))
         with col2:
-            st.metric("Input Tokens", f"{cost_data.get('input_tokens', 0):,}")
+            st.metric("Input Tokens", f"{cost_summary.get('total_input_tokens', 0):,}")
         with col3:
-            st.metric("Output Tokens", f"{cost_data.get('output_tokens', 0):,}")
+            st.metric("Output Tokens", f"{cost_summary.get('total_output_tokens', 0):,}")
         with col4:
-            estimated_cost = cost_data.get('estimated_cost_usd', 0)
-            st.metric("Total Cost", f"${estimated_cost:.4f}")
+            st.metric("Total Cost", f"${cost_summary.get('total_cost_usd', 0):.4f}")
+
+        # Cost breakdown by request type
+        cost_by_type = cost_summary.get('cost_by_type', {})
+        if cost_by_type:
+            st.subheader("📊 Cost by Request Type")
+            
+            # Create expandable sections for each request type
+            for request_type, type_data in cost_by_type.items():
+                request_count = type_data['count']
+                type_cost = type_data['total_cost']
+                type_input_tokens = type_data['total_input_tokens']
+                type_output_tokens = type_data['total_output_tokens']
+                
+                # Request type emoji mapping
+                type_emojis = {
+                    'brand_extraction': '🔍',
+                    'additional_details': '📋',
+                    'description_generation': '📝',
+                    'batch_processing': '📦',
+                    'vision': '👁️'
+                }
+                
+                emoji = type_emojis.get(request_type, '🤖')
+                type_title = request_type.replace('_', ' ').title()
+                
+                with st.expander(f"{emoji} {type_title} ({request_count} calls, ${type_cost:.4f})", expanded=False):
+                    # Summary for this request type
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Requests", request_count)
+                    with col2:
+                        st.metric("Input→Output", f"{type_input_tokens:,}→{type_output_tokens:,}")
+                    with col3:
+                        avg_cost = type_cost / request_count if request_count > 0 else 0
+                        st.metric("Avg Cost", f"${avg_cost:.4f}")
+                    
+                    # Individual requests for this type
+                    individual_requests = [req for req in cost_tracker.requests if req['request_type'] == request_type]
+                    
+                    if individual_requests:
+                        st.write("**Individual Requests:**")
+                        for i, req in enumerate(individual_requests, 1):
+                            req_time = req['timestamp'][:19].replace('T', ' ')  # Format timestamp
+                            req_input = req['input_tokens']
+                            req_output = req['output_tokens']
+                            req_cost = req['total_cost']
+                            req_images = req.get('images', 0)
+                            
+                            # Create a nice formatted display for each request
+                            if req_images > 0:
+                                st.write(f"🔸 **Request {i}** ({req_time})")
+                                st.write(f"   📊 {req_input:,} input + {req_output:,} output tokens + {req_images} image(s)")
+                                st.write(f"   💰 ${req_cost:.6f} (${req['input_cost']:.6f} + ${req['output_cost']:.6f} + ${req['image_cost']:.6f})")
+                            else:
+                                st.write(f"🔸 **Request {i}** ({req_time})")
+                                st.write(f"   📊 {req_input:,} input + {req_output:,} output tokens")
+                                st.write(f"   💰 ${req_cost:.6f} (${req['input_cost']:.6f} + ${req['output_cost']:.6f})")
+
+        # Pricing information
+        st.subheader("💵 Pricing Information")
+        st.info("""
+        **Gemini 2.5 Flash Pricing:**
+        - Input tokens: $0.30 per 1M tokens
+        - Output tokens: $2.50 per 1M tokens  
+        - Images: $0.0025 per image (estimated)
+        """)
+        
+        # Session statistics
+        if cost_summary.get('total_requests', 0) > 0:
+            st.subheader("📈 Session Statistics")
+            avg_input = cost_summary['total_input_tokens'] / cost_summary['total_requests']
+            avg_output = cost_summary['total_output_tokens'] / cost_summary['total_requests'] 
+            avg_cost = cost_summary['total_cost_usd'] / cost_summary['total_requests']
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Avg Input/Request", f"{avg_input:,.0f}")
+            with col2:
+                st.metric("Avg Output/Request", f"{avg_output:,.0f}")
+            with col3:
+                st.metric("Avg Cost/Request", f"${avg_cost:.4f}")
 
         # Summary stats
         st.markdown("---")
