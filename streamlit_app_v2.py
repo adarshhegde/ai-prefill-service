@@ -18,6 +18,7 @@ from main import (
     generate_vehicle_description_with_gemini,
     load_env_vars,
     get_preliminary_query,
+    cost_tracker,
 )
 
 # Load environment variables
@@ -214,19 +215,14 @@ def render_processing_page():
     """Render the processing page with two-step extraction."""
     st.header("🔄 AI Analysis in Progress")
     
-    # AGGRESSIVE RESET: Clear any existing cost data
-    if 'cost_analysis' in st.session_state:
-        st.session_state.cost_analysis = {
-            'api_calls': 0,
-            'total_tokens': 0,
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'estimated_cost_usd': 0.0
-        }
-    if hasattr(st.session_state, 'preliminary_tokens'):
-        del st.session_state.preliminary_tokens
+    # Reset the global cost tracker for this session
+    cost_tracker.total_input_tokens = 0
+    cost_tracker.total_output_tokens = 0
+    cost_tracker.total_images = 0
+    cost_tracker.total_cost = 0.0
+    cost_tracker.requests = []
     
-    st.write("🔄 **Session Reset**: Cleared all previous cost data")
+    st.write("🔄 **Session Reset**: Using fresh cost tracker")
     st.markdown("Processing your car images with advanced AI technology. Please wait...")
 
     if not st.session_state.vector_dataset:
@@ -426,78 +422,22 @@ def render_processing_page():
     
     st.success(f"🎉 **Parallel processing complete!**")
 
-    # Reset cost analysis for this session
+    # Get cost analysis from the global cost tracker (no manual calculations)
+    cost_summary = cost_tracker.get_cost_summary()
     st.session_state.cost_analysis = {
-        'api_calls': 0,
-        'total_tokens': 0,
-        'input_tokens': 0,
-        'output_tokens': 0,
-        'estimated_cost_usd': 0.0
+        'api_calls': cost_summary['total_requests'],
+        'total_tokens': cost_summary['total_input_tokens'] + cost_summary['total_output_tokens'],
+        'input_tokens': cost_summary['total_input_tokens'],
+        'output_tokens': cost_summary['total_output_tokens'],
+        'estimated_cost_usd': cost_summary['total_cost_usd']
     }
     
-    # Also reset preliminary tokens
-    if hasattr(st.session_state, 'preliminary_tokens'):
-        del st.session_state.preliminary_tokens
-    
-    # Update cost analysis for all processed images with actual token usage
     successful_images = sum(1 for result in extraction_results if result.get('success', False))
     total_images = len(extraction_results)
     
-    # Debug: Show what we're counting
-    st.write(f"🔍 **Debug**: Found {total_images} results, {successful_images} successful")
-    for i, result in enumerate(extraction_results):
-        st.write(f"  Result {i+1}: success={result.get('success', 'N/A')}")
-    
-    # Calculate actual token usage from successful extractions
-    total_input_tokens = 0
-    total_output_tokens = 0
-    
-    for result in extraction_results:
-        if result.get('success', False):
-            extracted_data = result.get('extracted_data', {})
-            token_usage = extracted_data.get('_token_usage', {})
-            input_tokens = token_usage.get('input_tokens', 0)
-            output_tokens = token_usage.get('output_tokens', 0)
-            total_input_tokens += input_tokens
-            total_output_tokens += output_tokens
-            st.write(f"  📊 Image {result.get('filename', 'Unknown')}: {input_tokens:,} input + {output_tokens:,} output tokens")
-            
-            # Debug: Check if token counts are realistic
-            if input_tokens > 100000 or output_tokens > 10000:
-                st.warning(f"⚠️ **SUSPICIOUS TOKEN COUNT**: {input_tokens:,} input + {output_tokens:,} output tokens")
-                st.write(f"    Raw token_usage: {token_usage}")
-    
-    # Add cost for all images processed (including failed ones, as API calls were still made)
-    # For failed calls, use estimates
-    failed_images = total_images - successful_images
-    estimated_input_tokens = total_input_tokens + (failed_images * 2000)  # Estimate for failed calls
-    estimated_output_tokens = total_output_tokens + (failed_images * 300)  # Estimate for failed calls
-    
-    # Update cost analysis with total tokens (not accumulated)
-    st.session_state.cost_analysis['api_calls'] = total_images
-    st.session_state.cost_analysis['input_tokens'] = estimated_input_tokens
-    st.session_state.cost_analysis['output_tokens'] = estimated_output_tokens
-    st.session_state.cost_analysis['total_tokens'] = estimated_input_tokens + estimated_output_tokens
-    
-    # Add preliminary query tokens
-    preliminary_tokens = getattr(st.session_state, 'preliminary_tokens', {'input_tokens': 0, 'output_tokens': 0})
-    total_input_tokens_with_preliminary = estimated_input_tokens + preliminary_tokens['input_tokens']
-    total_output_tokens_with_preliminary = estimated_output_tokens + preliminary_tokens['output_tokens']
-    
-    # Update cost analysis with total tokens (including preliminary)
-    st.session_state.cost_analysis['api_calls'] = total_images + 1  # +1 for preliminary query
-    st.session_state.cost_analysis['input_tokens'] = total_input_tokens_with_preliminary
-    st.session_state.cost_analysis['output_tokens'] = total_output_tokens_with_preliminary
-    st.session_state.cost_analysis['total_tokens'] = total_input_tokens_with_preliminary + total_output_tokens_with_preliminary
-    
-    # Calculate cost
-    input_cost = (total_input_tokens_with_preliminary / 1000) * 0.00125
-    output_cost = (total_output_tokens_with_preliminary / 1000) * 0.005
-    st.session_state.cost_analysis['estimated_cost_usd'] = input_cost + output_cost
-    
     st.info(f"📊 **Cost Summary**: Processed {total_images} images ({successful_images} successful, {total_images-successful_images} failed)")
-    st.info(f"🔍 **Token Usage**: {total_input_tokens:,} input + {total_output_tokens:,} output tokens (actual from successful calls)")
-    st.info(f"💰 **Estimated Total**: {estimated_input_tokens:,} input + {estimated_output_tokens:,} output tokens (including failed estimates)")
+    st.info(f"🔍 **Token Usage**: {cost_summary['total_input_tokens']:,} input + {cost_summary['total_output_tokens']:,} output tokens")
+    st.info(f"💰 **Total Cost**: ${cost_summary['total_cost_usd']:.4f} ({cost_summary['total_requests']} API calls)")
 
     with st.spinner("Merging extracted data..."):
         merged_data = merge_extracted_data(extraction_results)
@@ -532,6 +472,24 @@ def render_processing_page():
             
             if description_result.get('description'):
                 st.success(f"✅ Vehicle description generated! ({completion_percentage:.1f}% field completion)")
+                
+                # Show description generation cost info (already tracked by cost_tracker)
+                desc_tokens = description_result.get('token_usage', {})
+                if desc_tokens:
+                    desc_input_tokens = desc_tokens.get('input_tokens', 0)
+                    desc_output_tokens = desc_tokens.get('output_tokens', 0)
+                    desc_cost = desc_tokens.get('cost_usd', 0)
+                    st.info(f"💰 Description cost: ${desc_cost:.4f} ({desc_input_tokens:,}→{desc_output_tokens:,} tokens)")
+                
+                # Update cost analysis from tracker (description cost already included)
+                cost_summary = cost_tracker.get_cost_summary()
+                st.session_state.cost_analysis.update({
+                    'api_calls': cost_summary['total_requests'],
+                    'total_tokens': cost_summary['total_input_tokens'] + cost_summary['total_output_tokens'],
+                    'input_tokens': cost_summary['total_input_tokens'],
+                    'output_tokens': cost_summary['total_output_tokens'],
+                    'estimated_cost_usd': cost_summary['total_cost_usd']
+                })
             else:
                 st.info(f"ℹ️ Description generation attempted but failed ({completion_percentage:.1f}% completion)")
     else:
@@ -838,32 +796,7 @@ def create_form_schema(vector_dataset, vector_search_results=None):
         'fuel_types': [v['label'] for v in vector_dataset['form_field_mappings']['fuel_type']['values']]
     }
 
-def update_cost_analysis(api_calls=1, input_tokens=0, output_tokens=0):
-    """Update cost analysis with API usage data."""
-    # Gemini 2.5 Flash pricing (updated 2024)
-    # Simplified single-tier pricing
-    INPUT_COST_PER_1K = 0.0003    # $0.30 per 1M input tokens
-    OUTPUT_COST_PER_1K = 0.0025   # $2.50 per 1M output tokens
-    
-    # Ensure cost_analysis exists in session state
-    if 'cost_analysis' not in st.session_state:
-        st.session_state.cost_analysis = {
-            'api_calls': 0,
-            'total_tokens': 0,
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'estimated_cost_usd': 0.0
-        }
-    
-    st.session_state.cost_analysis['api_calls'] += api_calls
-    st.session_state.cost_analysis['input_tokens'] += input_tokens
-    st.session_state.cost_analysis['output_tokens'] += output_tokens
-    st.session_state.cost_analysis['total_tokens'] = st.session_state.cost_analysis['input_tokens'] + st.session_state.cost_analysis['output_tokens']
-    
-    # Calculate cost
-    input_cost = (st.session_state.cost_analysis['input_tokens'] / 1000) * INPUT_COST_PER_1K
-    output_cost = (st.session_state.cost_analysis['output_tokens'] / 1000) * OUTPUT_COST_PER_1K
-    st.session_state.cost_analysis['estimated_cost_usd'] = input_cost + output_cost
+# Removed manual cost calculation function - using cost_tracker only
 
 def merge_extracted_data(extraction_results):
     """Merge extraction results from multiple images."""
