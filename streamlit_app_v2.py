@@ -15,6 +15,7 @@ from main import (
     setup_faiss_vector_search,
     search_vector_database,
     generate_ikman_form_submission_json,
+    generate_vehicle_description_with_gemini,
     load_env_vars,
     get_preliminary_query,
 )
@@ -508,6 +509,38 @@ def render_processing_page():
         ikman_form_json = generate_ikman_form_submission_json(
             merged_data, st.session_state.vector_dataset, {'confidence': merged_data.get('confidence', 0)}
         )
+    
+    # Check if we should generate vehicle description (>60% completion)
+    ai_generated = ikman_form_json.get('ai_generated', {})
+    filled_fields = [k for k, v in ai_generated.items() if v != "manual_fill_required"]
+    total_fields = len(ai_generated)
+    completion_percentage = (len(filled_fields) / total_fields * 100) if total_fields > 0 else 0
+    
+    if completion_percentage > 60:
+        with st.spinner("Generating vehicle description..."):
+            # Get the first image path for description generation
+            first_image_path = None
+            if file_paths:
+                first_image_path = file_paths[0]
+            
+            description_result = generate_vehicle_description_with_gemini(
+                ikman_form_json, 
+                merged_data, 
+                first_image_path
+            )
+            ikman_form_json['vehicle_description'] = description_result
+            
+            if description_result.get('description'):
+                st.success(f"✅ Vehicle description generated! ({completion_percentage:.1f}% field completion)")
+            else:
+                st.info(f"ℹ️ Description generation attempted but failed ({completion_percentage:.1f}% completion)")
+    else:
+        ikman_form_json['vehicle_description'] = {
+            'description': None,
+            'completion_percentage': completion_percentage,
+            'reason': f'Insufficient data: Only {completion_percentage:.1f}% of fields available (need >60%)'
+        }
+        st.info(f"ℹ️ Skipping description generation - only {completion_percentage:.1f}% of fields completed (need >60%)")
 
     st.session_state.processing_result = {
         'ikman_form_submission': ikman_form_json,
@@ -678,8 +711,34 @@ def render_results_page():
                     # Manual input required with red chip styling
                     st.markdown(f"{label}: :red[🔴 **Manual input required**]")
 
-        # Remove the separate manual review section since it's now integrated
-        # Manual review section is now integrated above
+        # Vehicle description section
+        vehicle_description = result['ikman_form_submission'].get('vehicle_description', {})
+        if vehicle_description.get('description'):
+            st.markdown("---")
+            st.subheader("📝 Generated Vehicle Description")
+            
+            completion_rate = vehicle_description.get('completion_percentage', 0)
+            st.info(f"Generated based on {completion_rate:.1f}% field completion")
+            
+            # Display the description in an expandable section
+            with st.expander("View Generated Description", expanded=True):
+                st.write(vehicle_description['description'])
+            
+            # Show token usage for description generation if available
+            desc_tokens = vehicle_description.get('token_usage', {})
+            if desc_tokens:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Description Input Tokens", f"{desc_tokens.get('input_tokens', 0):,}")
+                with col2:
+                    st.metric("Description Output Tokens", f"{desc_tokens.get('output_tokens', 0):,}")
+                with col3:
+                    st.metric("Description Cost", f"${desc_tokens.get('cost_usd', 0):.4f}")
+        elif vehicle_description.get('reason'):
+            st.markdown("---")
+            st.subheader("📝 Vehicle Description")
+            completion_rate = vehicle_description.get('completion_percentage', 0)
+            st.warning(f"Description not generated: {vehicle_description['reason']}")
 
         # Detailed API cost breakdown
         st.markdown("---")

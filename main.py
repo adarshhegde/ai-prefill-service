@@ -126,6 +126,241 @@ class GeminiCostTracker:
 cost_tracker = GeminiCostTracker()
 
 
+def generate_vehicle_description_with_gemini(ikman_form_data, extracted_data, image_path=None, max_retries=3):
+    """Generate vehicle description using Gemini with the provided prompt template"""
+    
+    api_key = setup_gemini_client()
+    
+    # Calculate completion percentage
+    ai_generated = ikman_form_data.get('ai_generated', {})
+    filled_fields = [k for k, v in ai_generated.items() if v != "manual_fill_required"]
+    total_fields = len(ai_generated)
+    completion_percentage = (len(filled_fields) / total_fields * 100) if total_fields > 0 else 0
+    
+    # Only generate description if more than 60% of fields are available
+    if completion_percentage <= 60:
+        return {
+            'description': None,
+            'completion_percentage': completion_percentage,
+            'reason': f'Insufficient data: Only {completion_percentage:.1f}% of fields available (need >60%)'
+        }
+    
+    # Extract brand and model for the prompt
+    brand_model = f"{extracted_data.get('brand', '')} {extracted_data.get('model', '')}".strip()
+    if not brand_model or brand_model.lower() in ['unknown unknown', 'unknown', '']:
+        brand_model = "Unknown Vehicle"
+    
+    # Create vehicle specifications JSON from ikman form data
+    vehicle_specs = {}
+    
+    # Map form fields to more readable specifications
+    field_mapping = {
+        'brand': 'brand',
+        'model': 'model', 
+        'model_year': 'year',
+        'condition': 'condition',
+        'body': 'body_type',
+        'fuel_type': 'fuel_type',
+        'transmission': 'transmission',
+        'engine_capacity': 'engine_capacity',
+        'mileage': 'mileage',
+        'price': 'price',
+        'color': 'color',
+        'edition': 'edition'
+    }
+    
+    for form_field, spec_field in field_mapping.items():
+        if form_field in ai_generated and ai_generated[form_field] != "manual_fill_required":
+            vehicle_specs[spec_field] = ai_generated[form_field]
+    
+    # Add additional extracted data
+    for field in ['color']:
+        if field in extracted_data and extracted_data[field]:
+            vehicle_specs[field] = extracted_data[field]
+    
+    # Format the ikman form submission JSON for the prompt
+    ikman_form_submission_json = json.dumps(vehicle_specs, indent=2)
+    
+    # Vehicle description prompt template
+    prompt = f"""Can you help me write a vehicle description for for_sale car with brand and model {brand_model} in language english present in Colombo with below specifications:
+Guidelines:
+1. Start with Essential Vehicle Details:
+    * Include: Make, model, year, mileage, transmission type, and condition
+    * Keep language simple and natural with short, direct sentences
+    * Add relevant emojis wherever appropriate to bring a human and relatable touch to the message. Use them to convey emotions, highlight key points, or make the content more engaging and friendly (🚗, 🛻, 🏍️, etc.)
+    * Mimic how a vehicle seller speaks, use phrases like: • "Well-maintained..." • "Single-owner..." • "Family-owned..." • "Accident-free..." • "Fresh import..." • "Negotiable..."
+    * Ensure the description is factual, concise, and clear, avoiding assumptions
+
+2. Content Structure:
+    * Title: Year + Make + Model + Key selling points (e.g., "2019 Toyota Corolla - Low Mileage")
+    * Location
+    * Description: Start with core details (year, make, model, mileage, transmission, fuel type)
+    * Features: Use bullet points for specifications and modifications
+    * Service History: Mention maintenance records, recent repairs, or upgrades if provided or don't add it to the description.
+    * Add product condition if it is given, don't assume.
+    * End with a call to action encouraging test drives, inspections, or viewing appointments
+    * Show the asking price if present in VEHICLE SPECIFICATIONS. If no price is given don't assume and don't add it to the description.
+
+3. Formatting:
+    * Use short, simple sentences
+    * Use bullet points for vehicle features and specifications
+    * End with automotive-related keywords for search optimization
+
+4. Handling Missing Data:
+    * Only include information explicitly stated in the vehicle specifications
+    * Use standard manufacturer specifications when specific details are missing
+    * If critical details are missing (e.g., mileage, year), output "I don't know"
+
+5. Variation Guidelines:
+    * Randomize the order of features and technical specifications
+    * Alternate opening sentences (e.g., "Rare find," "Excellent condition")
+    * Use automotive terminology appropriately
+    * Switch between casual and formal tones
+    * Highlight different vehicle features and group related ones
+    * Alternate between concise and detailed descriptions
+    * Experiment with different format styles
+    * Rotate title styles like "Quick Sale: {brand_model}" or "For Sale: {brand_model}"
+
+6. Content Guidelines:
+    * Use natural, conversational language that car sellers typically use
+    * Avoid excessive marketing language or unrealistic claims
+    * Be concise and factual, limiting descriptions to under 200 words
+    * Focus on important vehicle-specific details (condition, maintenance, modifications)
+
+{ikman_form_submission_json}
+
+Please generate only the vehicle description text, without any additional explanations or JSON formatting."""
+
+    # Prepare payload for text-only request (no image)
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.7,  # Slightly higher for creative description writing
+            "topK": 40,
+            "topP": 0.95,
+            "candidateCount": 1
+        }
+    }
+    
+    # If image is provided, include it in the request
+    if image_path and os.path.exists(image_path):
+        try:
+            image_base64 = encode_image_to_base64(image_path)
+            payload["contents"][0]["parts"].append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": image_base64
+                }
+            })
+            print("🖼️ Including image in description generation")
+        except Exception as e:
+            print(f"⚠️ Could not include image in description generation: {e}")
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    
+    # Retry logic
+    for attempt in range(max_retries):
+        try:
+            print(f"📝 Generating vehicle description... (attempt {attempt + 1}/{max_retries})")
+            start_time = time.time()
+            
+            if attempt > 0:
+                delay = min(2 ** attempt, 10)
+                print(f"⏳ Waiting {delay}s before retry...")
+                time.sleep(delay)
+            
+            response = requests.post(url, json=payload, timeout=90)
+            response.raise_for_status()
+            
+            api_duration = time.time() - start_time
+            print(f"📊 Processing description response... (took {api_duration:.1f}s)")
+            result = response.json()
+            
+            if 'candidates' in result and result['candidates']:
+                candidate = result['candidates'][0]
+                finish_reason = candidate.get('finishReason', 'UNKNOWN')
+                
+                if finish_reason == 'MAX_TOKENS':
+                    print(f"❌ Description truncated due to token limit")
+                    return {
+                        'description': None,
+                        'completion_percentage': completion_percentage,
+                        'error': 'Response truncated due to token limit'
+                    }
+                
+                try:
+                    description_text = candidate['content']['parts'][0]['text'].strip()
+                except (KeyError, IndexError, TypeError) as e:
+                    print(f"❌ Error accessing description content: {e}")
+                    return {
+                        'description': None,
+                        'completion_percentage': completion_percentage,
+                        'error': f'Invalid response structure: {e}'
+                    }
+                
+                # Extract token usage
+                usage_info = result.get('usageMetadata', {})
+                input_tokens = usage_info.get('promptTokenCount', 0)
+                output_tokens = usage_info.get('candidatesTokenCount', 0)
+                
+                # Track API costs
+                images_count = 1 if (image_path and os.path.exists(image_path)) else 0
+                request_cost = cost_tracker.add_request(input_tokens, output_tokens, images=images_count, request_type="description_generation")
+                print(f"💰 Description generation cost: ${request_cost:.4f}")
+                
+                print(f"✅ Vehicle description generated successfully")
+                print(f"📝 Description length: {len(description_text)} characters")
+                
+                return {
+                    'description': description_text,
+                    'completion_percentage': completion_percentage,
+                    'token_usage': {
+                        'input_tokens': input_tokens,
+                        'output_tokens': output_tokens,
+                        'total_tokens': input_tokens + output_tokens,
+                        'cost_usd': request_cost
+                    }
+                }
+            else:
+                print("❌ No description response from Gemini API")
+                return {
+                    'description': None,
+                    'completion_percentage': completion_percentage,
+                    'error': 'No response from Gemini API'
+                }
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Description API request failed (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:
+                return {
+                    'description': None,
+                    'completion_percentage': completion_percentage,
+                    'error': f'API request failed after {max_retries} attempts: {e}'
+                }
+            continue
+        except Exception as e:
+            print(f"❌ Unexpected error in description generation (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:
+                return {
+                    'description': None,
+                    'completion_percentage': completion_percentage,
+                    'error': f'Unexpected error after {max_retries} attempts: {e}'
+                }
+            continue
+    
+    return {
+        'description': None,
+        'completion_percentage': completion_percentage,
+        'error': f'All {max_retries} attempts failed'
+    }
+
+
 def setup_gemini_client():
     """Setup Gemini AI client"""
     api_key = os.getenv('GEMINI_API_KEY')
@@ -797,6 +1032,28 @@ def process_car_image_end_to_end(image_path, vector_dataset, add_delay=True):
     
     print("✅ Form JSON generation completed")
     print(f"   Generated {len(ikman_form_json['ai_generated'])} form fields")
+    
+    # Step 6: Generate vehicle description if enough fields are available (>60%)
+    print("\n📝 Step 6: Checking if vehicle description generation is possible...")
+    combined_data = {**extracted_data, **additional_data}
+    description_result = generate_vehicle_description_with_gemini(
+        ikman_form_json, 
+        combined_data, 
+        image_path
+    )
+    
+    if description_result.get('description'):
+        print(f"✅ Vehicle description generated successfully")
+        print(f"   Completion rate: {description_result['completion_percentage']:.1f}%")
+        print(f"   Description length: {len(description_result['description'])} characters")
+        ikman_form_json['vehicle_description'] = description_result
+    else:
+        print(f"⚠️ Vehicle description not generated")
+        if 'reason' in description_result:
+            print(f"   Reason: {description_result['reason']}")
+        elif 'error' in description_result:
+            print(f"   Error: {description_result['error']}")
+        ikman_form_json['vehicle_description'] = description_result
     
     # Print cost summary at the end
     cost_tracker.print_cost_summary()
@@ -1726,6 +1983,14 @@ def process_car_images_batch(image_paths, vector_dataset, batch_size=3, max_retr
                                     # Generate form JSON with combined data
                                     combined_data = {**car_data, **additional_data}
                                     ikman_form_json = generate_ikman_form_submission_json(combined_data, vector_dataset, {'match': best_match})
+                                    
+                                    # Generate vehicle description if enough fields are available
+                                    description_result = generate_vehicle_description_with_gemini(
+                                        ikman_form_json, 
+                                        combined_data, 
+                                        image_path
+                                    )
+                                    ikman_form_json['vehicle_description'] = description_result
                                     
                                     all_results[image_path] = {
                                         'extracted_data': car_data,
