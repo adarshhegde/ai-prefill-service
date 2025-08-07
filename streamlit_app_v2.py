@@ -750,20 +750,7 @@ def render_results_page():
         - Images: $0.0025 per image (estimated)
         """)
         
-        # Session statistics
-        if cost_summary.get('total_requests', 0) > 0:
-            st.subheader("📈 Session Statistics")
-            avg_input = cost_summary['total_input_tokens'] / cost_summary['total_requests']
-            avg_output = cost_summary['total_output_tokens'] / cost_summary['total_requests'] 
-            avg_cost = cost_summary['total_cost_usd'] / cost_summary['total_requests']
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Avg Input/Request", f"{avg_input:,.0f}")
-            with col2:
-                st.metric("Avg Output/Request", f"{avg_output:,.0f}")
-            with col3:
-                st.metric("Avg Cost/Request", f"${avg_cost:.4f}")
+# Removed session statistics section - not needed for users
 
         # Summary stats
         st.markdown("---")
